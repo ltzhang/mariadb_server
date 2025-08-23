@@ -1,0 +1,54 @@
+--source include/not_embedded.inc
+--source include/have_sequence.inc
+--source include/have_innodb.inc
+set optimizer_record_context=ON;
+set optimizer_trace=1;
+
+create database db1;
+use db1;
+
+create table t1 (
+    c1 int,
+    c2 int,
+    index(c1),
+    index(c2)
+) ENGINE=InnoDB;
+
+insert into t1 select seq, seq from seq_1_to_1000;
+
+analyze table t1;
+
+--echo #
+--echo # run a query with two different ranges on the same index
+--echo # record stats and re-run same query
+--echo #
+set optimizer_replay_context="";
+
+explain format=json select * from t1 a, t1 b where a.c1 < 3 and b.c1 < 333 and a.c2 < 3 and b.c2 < 333;
+set @saved_opt_context=
+  (select json_pretty(json_extract(
+                        json_extract(trace, "$**.optimizer_context"),
+                        '$[0]'
+                      )
+  )
+  from information_schema.optimizer_trace);
+
+select @saved_opt_context;
+
+truncate table t1;
+set optimizer_replay_context=@saved_opt_context;
+explain format=json select * from t1 a, t1 b where a.c1 < 3 and b.c1 < 333 and a.c2 < 3 and b.c2 < 333;
+
+--echo #
+--echo # now, with the same replay context from above query,
+--echo # run different queries with subset of the ranges from above query
+--echo # there should be no warnings
+--echo #
+
+explain format=json select * from t1 a, t1 b where a.c1 < 3 and b.c2 < 333;
+
+explain format=json select * from t1 a, t1 b where a.c2 < 3 and b.c1 < 333;
+
+set optimizer_replay_context="";
+drop table t1;
+drop database db1;
