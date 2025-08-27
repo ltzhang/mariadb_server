@@ -6319,6 +6319,9 @@ bool THD::binlog_write_annotated_row(bool use_trans_cache)
 bool THD::binlog_write_table_maps()
 {
   bool binlog_using_only_trans_tables= 1;
+  bool binlog_using_non_trans_table_maybe=
+    main_lex.stmt_accessed_table(LEX::STMT_WRITES_NON_TRANS_TABLE) ||
+    lex->stmt_accessed_table(LEX::STMT_WRITES_NON_TRANS_TABLE);
   MYSQL_LOCK *locks[2], **locks_end= locks;
   DBUG_ENTER("THD::binlog_write_table_maps");
 
@@ -6333,6 +6336,8 @@ bool THD::binlog_write_table_maps()
   if ((*locks_end= lock))
     locks_end++;
 
+  if (unlikely(binlog_using_non_trans_table_maybe))
+  {
   /*
     Check if we are updating any non transactional tables
     We also call prepare_for_row_logging() for not yet used tables
@@ -6365,6 +6370,7 @@ bool THD::binlog_write_table_maps()
       }
     }
   }
+  }
 
   /*
     We write the Annotate_rows to the non_transactional cache if there
@@ -6385,10 +6391,28 @@ bool THD::binlog_write_table_maps()
          table_ptr++)
     {
       TABLE *table= *table_ptr;
-      if (table->current_lock != F_WRLCK || ! table->file->row_logging)
+      bool restore= 0;
+      /*
+        We have to also write table maps for tables that have not yet been
+        used, like for tables in after triggers
+      */
+      if (likely(!binlog_using_non_trans_table_maybe))
+      {
+	if (!table->file->row_logging &&
+            table->query_id != query_id && table->current_lock == F_WRLCK)
+        {
+          if (table->file->prepare_for_row_logging())
+            restore= 1;
+        }
+      }
+      else if (table->current_lock != F_WRLCK || ! table->file->row_logging)
         continue;
-      if (binlog_write_table_map(table))
-        DBUG_RETURN(1);
+      if (table->file->row_logging)
+      {
+        if (binlog_write_table_map(table))
+          DBUG_RETURN(1);
+      }
+
       if (table->restore_row_logging)
       {
         /*
@@ -6397,6 +6421,14 @@ bool THD::binlog_write_table_maps()
           statement
         */
         table->restore_row_logging= 0;
+        table->file->row_logging= table->file->row_logging_init= 0;
+      }
+      if (restore)
+      {
+        /*
+          Restore original setting so that it doesn't cause problem for the
+          next statement
+        */
         table->file->row_logging= table->file->row_logging_init= 0;
       }
     }
