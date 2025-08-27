@@ -6318,6 +6318,7 @@ bool THD::binlog_write_annotated_row(bool use_trans_cache)
 
 bool THD::binlog_write_table_maps()
 {
+  List<TABLE> restore_tables;
   bool binlog_using_only_trans_tables= 1;
   bool binlog_using_non_trans_table_maybe=
     main_lex.stmt_accessed_table(LEX::STMT_WRITES_NON_TRANS_TABLE) ||
@@ -6353,7 +6354,6 @@ bool THD::binlog_write_table_maps()
       handler *file= table->file;
       if (table->current_lock != F_WRLCK)
         continue;
-      table->restore_row_logging= 0;
       if (file->row_logging)
         binlog_using_only_trans_tables&= file->row_logging_has_trans;
       else
@@ -6364,7 +6364,7 @@ bool THD::binlog_write_table_maps()
         */
         if (table->query_id != query_id && file->prepare_for_row_logging())
         {
-          table->restore_row_logging= 1;
+          restore_tables.push_back(table, mem_root);
           binlog_using_only_trans_tables&= file->row_logging_has_trans;
         }
       }
@@ -6413,16 +6413,6 @@ bool THD::binlog_write_table_maps()
           DBUG_RETURN(1);
       }
 
-      if (table->restore_row_logging)
-      {
-        /*
-          Restore original setting, changed in in the Annotate_event
-          loop, so that it doesn't cause problem for the next
-          statement
-        */
-        table->restore_row_logging= 0;
-        table->file->row_logging= table->file->row_logging_init= 0;
-      }
       if (restore)
       {
         /*
@@ -6431,6 +6421,23 @@ bool THD::binlog_write_table_maps()
         */
         table->file->row_logging= table->file->row_logging_init= 0;
       }
+    }
+  }
+  if (!restore_tables.is_empty())
+  {
+    TABLE *table;
+    List_iterator<TABLE> restore_it(restore_tables);
+
+    restore_it.rewind();
+    while((table= restore_it++))
+    {
+      /*
+        Restore original setting, changed in in the Annotate_event
+        loop, so that it doesn't cause problem for the next
+        statement
+      */
+      table->file->row_logging= table->file->row_logging_init= 0;
+      restore_it.remove();
     }
   }
   binlog_table_maps= 1;                         // Table maps written
