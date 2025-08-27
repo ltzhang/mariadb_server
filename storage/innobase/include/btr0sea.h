@@ -109,6 +109,14 @@ struct btr_sea
   while a thread is holding a partition::latch, then also this must hold. */
   Atomic_relaxed<bool> enabled;
 
+private:
+  /** Disable the adaptive hash search system and empty the index.
+  @return whether the adaptive hash index was enabled */
+  ATTRIBUTE_COLD bool disable_and_lock() noexcept;
+
+  /** Unlock the adaptive hash search system. */
+  ATTRIBUTE_COLD void unlock() noexcept;
+public:
   /** Disable the adaptive hash search system and empty the index.
   @return whether the adaptive hash index was enabled */
   ATTRIBUTE_COLD bool disable() noexcept;
@@ -169,6 +177,8 @@ struct btr_sea
     inline bool erase(uint32_t fold, const rec_t *rec) noexcept;
   };
 
+  /** number of hash table entries, to be divided by n_parts */
+  uint n_cells;
   /** innodb_adaptive_hash_index_parts */
   ulong n_parts;
   /** Partitions of the adaptive hash index */
@@ -185,6 +195,9 @@ struct btr_sea
   void create() noexcept;
 
   void alloc(ulint hash_size) noexcept;
+
+  /** Change the number of cells */
+  void resize(uint n_cells) noexcept;
 
   /** Clear when disabling the adaptive hash index */
   inline void clear() noexcept;

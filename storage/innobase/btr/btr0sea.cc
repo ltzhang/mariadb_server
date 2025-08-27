@@ -351,7 +351,7 @@ ATTRIBUTE_COLD void btr_search_lazy_free(dict_index_t *index) noexcept
   table->autoinc_mutex.wr_unlock();
 }
 
-ATTRIBUTE_COLD bool btr_sea::disable() noexcept
+ATTRIBUTE_COLD bool btr_sea::disable_and_lock() noexcept
 {
   dict_sys.freeze(SRW_LOCK_CALL);
 
@@ -377,12 +377,22 @@ ATTRIBUTE_COLD bool btr_sea::disable() noexcept
   else
     dict_sys.unfreeze();
 
+  return was_enabled;
+}
+
+ATTRIBUTE_COLD void btr_sea::unlock() noexcept
+{
   for (ulong i= 0; i < n_parts; i++)
   {
     parts[i].latch.wr_unlock();
     parts[i].blocks_mutex.wr_unlock();
   }
+}
 
+ATTRIBUTE_COLD bool btr_sea::disable() noexcept
+{
+  const bool was_enabled{disable_and_lock()};
+  unlock();
   return was_enabled;
 }
 
@@ -408,16 +418,28 @@ ATTRIBUTE_COLD void btr_sea::enable(bool resize) noexcept
   if (!parts[0].table.array)
   {
     enabled= true;
-    alloc(buf_pool.curr_pool_size() / sizeof(void *) / 64);
+    alloc(n_cells);
   }
 
   ut_ad(enabled);
+  unlock();
+}
 
-  for (ulong i= 0; i < n_parts; i++)
+ATTRIBUTE_COLD void btr_sea::resize(uint n_cells) noexcept
+{
+  const bool was_enabled{disable_and_lock()};
+
+  clear();
+  ut_ad(!parts[0].table.array);
+  this->n_cells= n_cells;
+
+  if (was_enabled)
   {
-    parts[i].blocks_mutex.wr_unlock();
-    parts[i].latch.wr_unlock();
+    enabled= true;
+    alloc(n_cells);
   }
+
+  unlock();
 }
 
 #if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
