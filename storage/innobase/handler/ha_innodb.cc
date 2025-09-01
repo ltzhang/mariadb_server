@@ -28,6 +28,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** @file ha_innodb.cc */
 
+#define MYSQL_SERVER
 #include "univ.i"
 
 /* Include necessary SQL headers */
@@ -122,9 +123,20 @@ simple_thread_local ha_handler_stats *mariadb_stats;
 #include <limits>
 #include <myisamchk.h>                          // TT_FOR_UPGRADE
 
-extern "C" void thd_mark_transaction_to_rollback(MYSQL_THD thd, bool all);
-unsigned long long thd_get_query_id(const MYSQL_THD thd);
-void thd_clear_error(MYSQL_THD thd);
+#define thd_clear_error(thd) (thd)->clear_error()
+#define thd_get_query_id(thd) uint64_t((thd)->query_id)
+#define thd_get_thread_id(thd) (thd)->thread_id
+#define thd_in_lock_tables(thd) (thd)->in_lock_tables
+#define thd_log_warnings(thd) thd->variables.log_warnings
+#define thd_mark_transaction_to_rollback(thd, all) \
+  (thd)->mark_transaction_to_rollback(all)
+#define thd_sql_command(thd) (thd)->lex->sql_command
+#define thd_tablespace_op(thd) (thd)->tablespace_op
+#define thd_test_options(thd, options) ((thd)->variables.option_bits & (options))
+#define thd_tx_isolation(thd) (thd)->tx_isolation
+extern "C" int thd_binlog_format(const MYSQL_THD thd);
+extern "C" bool thd_binlog_filter_ok(const MYSQL_THD thd);
+extern "C" bool thd_sqlcom_can_generate_row_events(const MYSQL_THD thd);
 
 TABLE *find_fk_open_table(THD *thd, const char *db, size_t db_len,
 			  const char *table, size_t table_len);
@@ -1690,17 +1702,6 @@ inline uint32_t innodb_page_size_validate(ulong page_size)
 	DBUG_RETURN(0);
 }
 
-/******************************************************************//**
-Returns true if transaction should be flagged as read-only.
-@return true if the thd is marked as read-only */
-bool
-thd_trx_is_read_only(
-/*=================*/
-	THD*	thd)	/*!< in: thread handle */
-{
-	return(thd != 0 && thd_tx_is_read_only(thd));
-}
-
 static MYSQL_THDVAR_BOOL(background_thread,
 			 PLUGIN_VAR_NOCMDOPT | PLUGIN_VAR_NOSYSVAR,
 			 "Internal (not user visible) flag to mark "
@@ -1736,23 +1737,6 @@ innobase_reset_background_thd(MYSQL_THD thd)
 	thd_proc_info(thd, proc_info);
 }
 
-
-/******************************************************************//**
-Check if the transaction is an auto-commit transaction. TRUE also
-implies that it is a SELECT (read-only) transaction.
-@return true if the transaction is an auto commit read-only transaction. */
-ibool
-thd_trx_is_auto_commit(
-/*===================*/
-	THD*	thd)	/*!< in: thread handle, can be NULL */
-{
-	return(thd != NULL
-	       && !thd_test_options(
-		       thd,
-		       OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN)
-	       && thd_sql_command(thd) == SQLCOM_SELECT);
-}
-
 /******************************************************************//**
 Returns the NUL terminated value of glob_hostname.
 @return pointer to glob_hostname. */
@@ -1761,20 +1745,6 @@ server_get_hostname()
 /*=================*/
 {
 	return(glob_hostname);
-}
-
-/******************************************************************//**
-Returns true if the transaction this thread is processing has edited
-non-transactional tables. Used by the deadlock detector when deciding
-which transaction to rollback in case of a deadlock - we try to avoid
-rolling back transactions that have edited non-transactional tables.
-@return true if non-transactional tables have been edited */
-ibool
-thd_has_edited_nontrans_tables(
-/*===========================*/
-	THD*	thd)	/*!< in: thread handle */
-{
-	return((ibool) thd_non_transactional_update(thd));
 }
 
 /******************************************************************//**
@@ -2437,13 +2407,8 @@ innobase_get_stmt_unsafe(
 	THD*	thd,
 	size_t*	length)
 {
-	if (const LEX_STRING *stmt = thd_query_string(thd)) {
-		*length = stmt->length;
-		return stmt->str;
-	}
-
-	*length = 0;
-	return NULL;
+  *length= thd->query_string.length();
+  return thd->query_string.str();
 }
 
 /**
@@ -4420,7 +4385,7 @@ innobase_commit_ordered_2(
 	/* If the transaction is not run in 2pc, we must assign wsrep
 	XID here in order to get it written in rollback segment. */
 	if (trx->is_wsrep()) {
-		thd_get_xid(thd, &reinterpret_cast<MYSQL_XID&>(trx->xid));
+		trx->xid = *thd->get_xid();
 	}
 #endif /* WITH_WSREP */
 
@@ -4584,7 +4549,7 @@ innobase_commit(
 		/* At this point commit order is fixed and transaction is
 		visible to others. So we can wakeup other commits waiting for
 		this one, to allow then to group commit with us. */
-		thd_wakeup_subsequent_commits(thd, 0);
+		thd->wakeup_subsequent_commits(0);
 
 		/* Now do a write + flush of logs. */
 		trx_commit_complete_for_mysql(trx);
@@ -7687,6 +7652,9 @@ ha_innobase::innobase_lock_autoinc(void)
 				DBUG_RETURN(error);
 			}
 			m_prebuilt->table->autoinc_mutex.wr_unlock();
+			break;
+		default:
+			break;
 		}
 		/* Use old style locking. */
 		/* fall through */
@@ -7870,7 +7838,7 @@ ha_innobase::write_row(
 			case SQLCOM_INSERT:
 
 				WSREP_DEBUG("DUPKEY error for autoinc\n"
-				      "THD %ld, value %llu, off %llu inc %llu",
+				      "THD %llu, value %llu, off %llu inc %llu",
 				      thd_get_thread_id(m_user_thd),
 				      auto_inc,
 				      m_prebuilt->autoinc_offset,
@@ -7976,7 +7944,7 @@ set_max_autoinc:
 		if (wsrep_append_keys(m_user_thd, WSREP_SERVICE_KEY_EXCLUSIVE,
 				      record,
 				      NULL)) {
-			WSREP_DEBUG("::write_rows::wsrep_append_keys failed THD %ld for %s.%s",
+			WSREP_DEBUG("::write_rows::wsrep_append_keys failed THD %llu for %s.%s",
 				    thd_get_thread_id(m_user_thd),
 				    table->s->db.str,
 				    table->s->table_name.str);
@@ -8704,7 +8672,7 @@ func_exit:
 					     ? WSREP_SERVICE_KEY_UPDATE
 					     : WSREP_SERVICE_KEY_EXCLUSIVE,
 					     old_row, new_row)) {
-			WSREP_DEBUG("::update_rows::wsrep_append_keys failed THD %ld for %s.%s",
+			WSREP_DEBUG("::update_rows::wsrep_append_keys failed THD %llu for %s.%s",
 				    thd_get_thread_id(m_user_thd),
 				    table->s->db.str,
 				    table->s->table_name.str);
@@ -8760,7 +8728,7 @@ ha_innobase::delete_row(
 		if (wsrep_append_keys(m_user_thd, WSREP_SERVICE_KEY_EXCLUSIVE,
 				      record,
 				      NULL)) {
-			WSREP_DEBUG("::delete_rows::wsrep_append_keys failed THD %ld for %s.%s",
+			WSREP_DEBUG("::delete_rows::wsrep_append_keys failed THD %llu for %s.%s",
 				    thd_get_thread_id(m_user_thd),
 				    table->s->db.str,
 				    table->s->table_name.str);
@@ -10148,10 +10116,10 @@ wsrep_append_key(
 
 	DBUG_ENTER("wsrep_append_key");
 	DBUG_PRINT("enter",
-		    ("thd: %lu trx: %lld", thd_get_thread_id(thd),
+		    ("thd: %llu trx: %lld", thd_get_thread_id(thd),
 		    (long long)trx->id));
 #ifdef WSREP_DEBUG_PRINT
-	fprintf(stderr, "%s conn %lu, trx " TRX_ID_FMT ", keylen %d, key %s.%s\n",
+	fprintf(stderr, "%s conn %llu, trx " TRX_ID_FMT ", keylen %d, key %s.%s\n",
 		wsrep_key_type_to_str(key_type),
 		thd_get_thread_id(thd), trx->id, key_len,
 		table_share->table_name.str, key);
@@ -10235,14 +10203,14 @@ ha_innobase::wsrep_append_keys(
 	trx_t *trx = thd_to_trx(thd);
 
 #ifdef WSREP_DEBUG_PRINT
-	fprintf(stderr, "%s conn %lu, trx " TRX_ID_FMT ", table %s\nSQL: %s\n",
+	fprintf(stderr, "%s conn %llu, trx " TRX_ID_FMT ", table %s\nSQL: %s\n",
 		wsrep_key_type_to_str(key_type),
 		thd_get_thread_id(thd), trx->id,
 		table_share->table_name.str, wsrep_thd_query(thd));
 #endif
 
 	if (table_share && table_share->tmp_table  != NO_TMP_TABLE) {
-		WSREP_DEBUG("skipping tmp table DML: THD: %lu tmp: %d SQL: %s",
+		WSREP_DEBUG("skipping tmp table DML: THD: %llu tmp: %d SQL: %s",
 			    thd_get_thread_id(thd),
 			    table_share->tmp_table,
 			    (wsrep_thd_query(thd)) ?
@@ -12386,7 +12354,7 @@ create_table_info_t::create_foreign_keys()
 	dict_index_t*	      err_index	  = NULL;
 	ulint		      err_col	= 0;
 	const bool	      tmp_table = m_flags2 & DICT_TF2_TEMPORARY;
-	const CHARSET_INFO*   cs	= thd_charset(m_thd);
+	const CHARSET_INFO*   cs	= m_thd->charset();
 	const char*	      operation = "Create ";
 
 	enum_sql_command sqlcom = enum_sql_command(thd_sql_command(m_thd));
@@ -16105,6 +16073,8 @@ ha_innobase::start_stmt(
 						    error, 0, thd));
 			}
 			break;
+		default:
+			break;
 		}
 	}
 
@@ -16243,6 +16213,8 @@ ha_innobase::external_lock(
 			ib_senderrf(thd, IB_LOG_LEVEL_WARN,
 				    ER_READ_ONLY_MODE);
 			DBUG_RETURN(HA_ERR_TABLE_READONLY);
+		default:
+			break;
 		}
 	}
 
@@ -17255,7 +17227,7 @@ innobase_xa_prepare(
       trx_start_if_not_started_xa(trx, false);;
     /* fall through */
   case TRX_STATE_ACTIVE:
-    thd_get_xid(thd, &reinterpret_cast<MYSQL_XID&>(trx->xid));
+    trx->xid= *thd->get_xid();
     if (prepare_trx)
       trx_prepare_for_mysql(trx);
     else
@@ -18772,7 +18744,7 @@ static struct st_mysql_storage_engine innobase_storage_engine=
 @param bf_trx    brute force applier transaction
 @param thd_id    thd_get_thread_id(victim_trx->mysql_htd)
 @param trx_id    victim_trx->id */
-void lock_wait_wsrep_kill(trx_t *bf_trx, ulong thd_id, trx_id_t trx_id)
+void lock_wait_wsrep_kill(trx_t *bf_trx, my_thread_id thd_id, trx_id_t trx_id)
 {
   THD *bf_thd= bf_trx->mysql_thd;
 
@@ -18801,7 +18773,7 @@ void lock_wait_wsrep_kill(trx_t *bf_trx, ulong thd_id, trx_id_t trx_id)
           /* fall through */
         case TRX_STATE_ACTIVE:
           WSREP_LOG_CONFLICT(bf_thd, vthd, TRUE);
-          WSREP_DEBUG("Aborter BF trx_id: " TRX_ID_FMT " thread: %ld "
+          WSREP_DEBUG("Aborter BF trx_id: " TRX_ID_FMT " thread: %llu "
                       "seqno: %lld client_state: %s "
                       "client_mode: %s transaction_mode: %s query: %s",
                       bf_trx->id,
@@ -18811,7 +18783,7 @@ void lock_wait_wsrep_kill(trx_t *bf_trx, ulong thd_id, trx_id_t trx_id)
                       wsrep_thd_client_mode_str(bf_thd),
                       wsrep_thd_transaction_state_str(bf_thd),
                       wsrep_thd_query(bf_thd));
-          WSREP_DEBUG("Victim %s trx_id: " TRX_ID_FMT " thread: %ld "
+          WSREP_DEBUG("Victim %s trx_id: " TRX_ID_FMT " thread: %llu "
                       "seqno: %lld client_state: %s "
                       "client_mode: %s transaction_mode: %s query: %s",
                       wsrep_thd_is_BF(vthd, false) ? "BF" : "normal",
@@ -18857,7 +18829,7 @@ void lock_wait_wsrep_kill(trx_t *bf_trx, ulong thd_id, trx_id_t trx_id)
     }
     else
     {
-      WSREP_DEBUG("wsrep_thd_bf_abort has failed, victim %lu will survive",
+      WSREP_DEBUG("wsrep_thd_bf_abort has failed, victim %llu will survive",
                   thd_get_thread_id(vthd));
     }
     wsrep_thd_UNLOCK(vthd);
