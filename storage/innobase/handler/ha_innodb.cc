@@ -111,8 +111,6 @@ extern my_bool opt_readonly;
 #include "fil0pagecompress.h"
 #include "ut0mem.h"
 #include "row0ext.h"
-#include "mariadb_stats.h"
-simple_thread_local ha_handler_stats *mariadb_stats;
 
 #include "lz4.h"
 #include "lzo/lzo1x.h"
@@ -981,8 +979,7 @@ static SHOW_VAR innodb_status_variables[]= {
   {"buffer_pool_read_ahead", &buf_pool.stat.n_ra_pages_read, SHOW_SIZE_T},
   {"buffer_pool_read_ahead_evicted",
    &buf_pool.stat.n_ra_pages_evicted, SHOW_SIZE_T},
-  {"buffer_pool_read_requests",
-   &export_vars.innodb_buffer_pool_read_requests, SHOW_SIZE_T},
+  {"buffer_pool_read_requests", &buf_pool.stat.n_page_gets, SHOW_SIZE_T},
   {"buffer_pool_reads", &buf_pool.stat.n_pages_read, SHOW_SIZE_T},
   {"buffer_pool_wait_free", &buf_pool.stat.LRU_waits, SHOW_SIZE_T},
   {"buffer_pool_write_requests", &buf_pool.flush_list_requests, SHOW_SIZE_T},
@@ -1776,12 +1773,12 @@ const char *thd_innodb_tmpdir(THD *thd)
 	return(tmp_dir);
 }
 
-/** Obtain the InnoDB transaction of a MySQL thread.
-@param[in,out]	thd	thread handle
-@return reference to transaction pointer */
-static trx_t* thd_to_trx(THD* thd)
+/** Obtain the InnoDB transaction of a MariaDB thread handle.
+@param thd   current_thd
+@return InnoDB transaction */
+trx_t *thd_to_trx(THD *thd) noexcept
 {
-	return reinterpret_cast<trx_t*>(thd_get_ha_data(thd, innodb_hton_ptr));
+  return static_cast<trx_t*>(thd_get_ha_data(thd, innodb_hton_ptr));
 }
 
 #ifdef WITH_WSREP
@@ -7731,6 +7728,16 @@ int ha_innobase::is_valid_trx(bool altering_to_supported) const noexcept
   return HA_ERR_ROLLBACK;
 }
 
+namespace{
+struct mariadb_set_stats
+{
+  trx_t *const trx;
+  mariadb_set_stats(trx_t *trx, ha_handler_stats *stats) : trx(trx)
+  { trx->active_handler_stats= stats && stats->active ? stats : nullptr; }
+  ~mariadb_set_stats() { trx->active_handler_stats= nullptr; }
+};
+}
+
 /********************************************************************//**
 Stores a row in an InnoDB database, to the table specified in this
 handle.
@@ -7747,11 +7754,12 @@ ha_innobase::write_row(
 #endif
 	int		error_result = 0;
 	bool		auto_inc_used = false;
-	mariadb_set_stats set_stats_temporary(handler_stats);
 
 	DBUG_ENTER("ha_innobase::write_row");
 
 	trx_t*		trx = thd_to_trx(m_user_thd);
+
+	mariadb_set_stats temp(trx, handler_stats);
 
 	/* Validation checks before we commence write_row operation. */
 	if (int err = is_valid_trx()) {
@@ -8531,7 +8539,6 @@ ha_innobase::update_row(
 
 	dberr_t		error;
 	trx_t*		trx = thd_to_trx(m_user_thd);
-	mariadb_set_stats set_stats_temporary(handler_stats);
 
 	DBUG_ENTER("ha_innobase::update_row");
 
@@ -8560,6 +8567,8 @@ ha_innobase::update_row(
 			DBUG_RETURN(HA_ERR_OUT_OF_MEM);
 		}
 	}
+
+	mariadb_set_stats temp(trx, handler_stats);
 
 	upd_t*		uvect = row_get_prebuilt_update_vector(m_prebuilt);
 	ib_uint64_t	autoinc;
@@ -8651,7 +8660,7 @@ func_exit:
 	}
 
 #ifdef WITH_WSREP
-	if (error == DB_SUCCESS &&
+	if (!err &&
 	    /* For sequences, InnoDB transaction may not have been started yet.
 	    Check THD-level wsrep state in that case. */
 	    (trx->is_wsrep()
@@ -8695,7 +8704,6 @@ ha_innobase::delete_row(
 {
 	dberr_t		error;
 	trx_t*		trx = thd_to_trx(m_user_thd);
-	mariadb_set_stats set_stats_temporary(handler_stats);
 
 	DBUG_ENTER("ha_innobase::delete_row");
 
@@ -8716,6 +8724,7 @@ ha_innobase::delete_row(
 	trx->fts_next_doc_id = 0;
 
 	ut_ad(!trx->is_bulk_insert());
+	mariadb_set_stats temp(trx, handler_stats);
 	error = row_update_for_mysql(m_prebuilt);
 
 	ut_ad(error != DB_DUPLICATE_KEY);
@@ -8960,7 +8969,6 @@ ha_innobase::index_read(
 	enum ha_rkey_function find_flag)/*!< in: search flags from my_base.h */
 {
 	DBUG_ENTER("index_read");
-	mariadb_set_stats set_stats_temporary(handler_stats);
 	DEBUG_SYNC_C("ha_innobase_index_read_begin");
 
 	ut_ad(m_prebuilt->trx == thd_to_trx(m_user_thd));
@@ -9034,6 +9042,7 @@ ha_innobase::index_read(
 		DBUG_RETURN(HA_ERR_UNSUPPORTED);
 	}
 
+	mariadb_set_stats temp(m_prebuilt->trx, handler_stats);
 	dberr_t ret =
 		row_search_mvcc(buf, mode, m_prebuilt, m_last_match_mode, 0);
 
@@ -9049,7 +9058,7 @@ ha_innobase::index_read(
 	switch (ret) {
 	case DB_TABLESPACE_DELETED:
 		ib_senderrf(
-			m_prebuilt->trx->mysql_thd, IB_LOG_LEVEL_ERROR,
+			m_user_thd, IB_LOG_LEVEL_ERROR,
 			ER_TABLESPACE_DISCARDED,
 			table->s->table_name.str);
 		DBUG_RETURN(HA_ERR_TABLESPACE_MISSING);
@@ -9058,7 +9067,7 @@ ha_innobase::index_read(
 		DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
 	case DB_TABLESPACE_NOT_FOUND:
 		ib_senderrf(
-			m_prebuilt->trx->mysql_thd, IB_LOG_LEVEL_ERROR,
+			m_user_thd, IB_LOG_LEVEL_ERROR,
 			ER_TABLESPACE_MISSING,
 			table->s->table_name.str);
 		DBUG_RETURN(HA_ERR_TABLESPACE_MISSING);
@@ -9259,8 +9268,7 @@ ha_innobase::general_fetch(
 {
 	DBUG_ENTER("general_fetch");
 
-	mariadb_set_stats set_stats_temporary(handler_stats);
-	const trx_t*	trx = m_prebuilt->trx;
+	trx_t*	trx = m_prebuilt->trx;
 
 	ut_ad(trx == thd_to_trx(m_user_thd));
 
@@ -9286,6 +9294,7 @@ ha_innobase::general_fetch(
 
 	int	error;
 
+	mariadb_set_stats temp(trx, handler_stats);
 	switch (dberr_t	ret = row_search_mvcc(buf, PAGE_CUR_UNSUPP, m_prebuilt,
 					      match_mode, direction)) {
 	case DB_SUCCESS:
@@ -9742,7 +9751,6 @@ ha_innobase::ft_read(
 	uchar*		buf)		/*!< in/out: buf contain result row */
 {
 	row_prebuilt_t*	ft_prebuilt;
-	mariadb_set_stats set_stats_temporary(handler_stats);
 
 	ft_prebuilt = reinterpret_cast<NEW_FT_INFO*>(ft_handler)->ft_prebuilt;
 
@@ -9816,6 +9824,7 @@ next_record:
 			tuple, index, &search_doc_id);
 
 		if (ret == DB_SUCCESS) {
+			mariadb_set_stats temp(m_prebuilt->trx, handler_stats);
 			ret = row_search_mvcc(
 				buf, PAGE_CUR_GE, m_prebuilt,
 				ROW_SEL_EXACT, 0);
@@ -13855,7 +13864,6 @@ static dberr_t innobase_rename_table(trx_t *trx, const char *from,
 @retval	0	on success */
 int ha_innobase::truncate()
 {
-  mariadb_set_stats set_stats_temporary(handler_stats);
   DBUG_ENTER("ha_innobase::truncate");
 
   update_thd();
@@ -14342,7 +14350,9 @@ ha_innobase::records_in_range(
 	index due to inconsistency between MySQL and InoDB dictionary info.
 	Necessary message should have been printed in innobase_get_index() */
 	if (!index || !m_prebuilt->table->space) {
-		goto func_exit;
+func_exit:
+		m_prebuilt->trx->op_info = "";
+		DBUG_RETURN((ha_rows) n_rows);
 	}
 	if (index->is_corrupted()) {
 		n_rows = HA_ERR_INDEX_CORRUPT;
@@ -14364,7 +14374,10 @@ ha_innobase::records_in_range(
 		mode1 = PAGE_CUR_GE;
 		dtuple_set_n_fields(range_start, 0);
 	} else if (convert_search_mode_to_innobase(min_key->flag, mode1)) {
-		goto unsupported;
+	cleanup:
+	unsupported:
+		mem_heap_free(heap);
+		goto func_exit;
 	} else {
 		dict_index_copy_types(range_start, index, key->ext_key_parts);
 		row_sel_convert_mysql_key_to_innobase(
@@ -14389,6 +14402,8 @@ ha_innobase::records_in_range(
 			index, max_key->key, max_key->length);
 		DBUG_ASSERT(range_end->n_fields > 0);
 	}
+
+	mariadb_set_stats temp(m_prebuilt->trx, handler_stats);
 
 	if (dict_index_is_spatial(index)) {
 		/*Only min_key used in spatial index. */
@@ -14421,11 +14436,7 @@ ha_innobase::records_in_range(
 		n_rows = 1;
 	}
 
-unsupported:
-	mem_heap_free(heap);
-func_exit:
-	m_prebuilt->trx->op_info = "";
-	DBUG_RETURN((ha_rows) n_rows);
+	goto cleanup;
 }
 
 /*********************************************************************//**
@@ -14440,7 +14451,6 @@ ha_innobase::estimate_rows_upper_bound()
 	const dict_index_t*	index;
 	ulonglong		estimate;
 	ulonglong		local_data_file_length;
-	mariadb_set_stats set_stats_temporary(handler_stats);
 	DBUG_ENTER("estimate_rows_upper_bound");
 
 	/* We do not know if MySQL can call this function before calling
@@ -14448,8 +14458,6 @@ ha_innobase::estimate_rows_upper_bound()
 	handle. */
 
 	update_thd(ha_thd());
-
-	m_prebuilt->trx->op_info = "calculating upper bound for table rows";
 
 	index = dict_table_get_first_index(m_prebuilt->table);
 
@@ -14467,8 +14475,6 @@ ha_innobase::estimate_rows_upper_bound()
 
 	estimate = 2 * local_data_file_length
 		/ dict_index_calc_min_rec_len(index);
-
-	m_prebuilt->trx->op_info = "";
 
         /* Set num_rows less than MERGEBUFF to simulate the case where we do
         not have enough space to merge the externally sorted file blocks. */
@@ -15876,7 +15882,7 @@ ha_innobase::extra(
 		goto stmt_boundary;
 	case HA_EXTRA_NO_IGNORE_DUP_KEY:
 		trx = check_trx_exists(ha_thd());
-		trx->duplicates &= ~TRX_DUP_IGNORE;
+		trx->duplicates &= TRX_DUP_REPLACE;
 		if (trx->is_bulk_insert()) {
 			/* Allow a subsequent INSERT into an empty table
 			if !unique_checks && !foreign_key_checks. */
@@ -15893,7 +15899,7 @@ ha_innobase::extra(
 		goto stmt_boundary;
 	case HA_EXTRA_WRITE_CANNOT_REPLACE:
 		trx = check_trx_exists(ha_thd());
-		trx->duplicates &= ~TRX_DUP_REPLACE;
+		trx->duplicates &= TRX_DUP_IGNORE;
 		if (trx->is_bulk_insert()) {
 			/* Allow a subsequent INSERT into an empty table
 			if !unique_checks && !foreign_key_checks. */
@@ -16813,7 +16819,6 @@ ha_innobase::get_auto_increment(
 	trx_t*		trx;
 	dberr_t		error;
 	ulonglong	autoinc = 0;
-	mariadb_set_stats set_stats_temporary(handler_stats);
 
 	/* Prepare m_prebuilt->trx in the table handle */
 	update_thd(ha_thd());

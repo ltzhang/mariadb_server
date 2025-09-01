@@ -42,7 +42,6 @@ Created 11/5/1995 Heikki Tuuri
 #include "srv0start.h"
 #include "srv0srv.h"
 #include "log.h"
-#include "mariadb_stats.h"
 
 /** If there are buf_pool.curr_size() per the number below pending reads, then
 read-ahead is not done: this is to prevent flooding the buffer pool with
@@ -244,13 +243,23 @@ func_exit:
   return bpage;
 }
 
+inline ulonglong mariadb_measure() noexcept
+{
+#if (MY_TIMER_ROUTINE_CYCLES)
+  return my_timer_cycles();
+#else
+  return my_timer_microseconds();
+#endif
+}
+
 /** Low-level function which reads a page asynchronously from a file to the
 buffer buf_pool if it is not already there, in which case does nothing.
 Sets the io_fix flag and sets an exclusive lock on the buffer frame. The
 flag is cleared and the x-lock released by an i/o-handler thread.
 
 @param[in,out] space	tablespace
-@param[in] sync		true if synchronous aio is desired
+@param[in] sync		whether synchronous aio is desired
+@param[in] thd		current_thd
 @param[in] mode		BUF_READ_IBUF_PAGES_ONLY, ...,
 @param[in] page_id	page id
 @param[in] zip_size	ROW_FORMAT=COMPRESSED page size, or 0
@@ -263,6 +272,7 @@ dberr_t
 buf_read_page_low(
 	fil_space_t*		space,
 	bool			sync,
+	THD*			thd,
 	ulint			mode,
 	const page_id_t		page_id,
 	ulint			zip_size,
@@ -302,14 +312,12 @@ buf_read_page_low(
 
 	ut_ad(bpage->in_file());
 	ulonglong mariadb_timer = 0;
+        trx_t *const trx= thd ? thd_to_trx(thd) : nullptr;
 
-	if (sync) {
-		thd_wait_begin(nullptr, THD_WAIT_DISKIO);
-		if (const ha_handler_stats *stats = mariadb_stats) {
-			if (stats->active) {
-				mariadb_timer = mariadb_measure();
-			}
-		}
+	thd_wait_begin(thd, THD_WAIT_DISKIO);
+
+	if (trx && trx->active_handler_stats) {
+		mariadb_timer = mariadb_measure();
 	}
 
 	DBUG_LOG("ib_buf",
@@ -329,16 +337,35 @@ buf_read_page_low(
 		recv_sys.free_corrupted_page(page_id, *space->chain.start);
 		buf_pool.corrupted_evict(bpage, buf_page_t::READ_FIX);
 	} else if (sync) {
-		thd_wait_end(nullptr);
+		thd_wait_end(thd);
 		/* The i/o was already completed in space->io() */
 		fio.err = bpage->read_complete(*fio.node);
 		space->release();
 		if (mariadb_timer) {
-			mariadb_increment_pages_read_time(mariadb_timer);
+			trx->active_handler_stats->pages_read_time
+				+= mariadb_measure() - mariadb_timer;
 		}
 	}
 
 	return fio.err;
+}
+
+/** Report a completed read-ahead batch.
+@param space  tablespace
+@param count  number of pages submitted for reading */
+static ATTRIBUTE_NOINLINE
+void buf_read_ahead_report(const fil_space_t &space, size_t count) noexcept
+{
+  if (THD *thd= current_thd)
+    if (trx_t *trx= thd_to_trx(thd))
+      if (ha_handler_stats *stats= trx->active_handler_stats)
+        stats->pages_prefetched+= count;
+  mysql_mutex_lock(&buf_pool.mutex);
+  /* Read ahead is considered one I/O operation for the purpose of
+     LRU policy decision. */
+  buf_LRU_stat_inc_io();
+  buf_pool.stat.n_ra_pages_read_rnd+= count;
+  mysql_mutex_unlock(&buf_pool.mutex);
 }
 
 /** Applies a random read-ahead in buf_pool if there are at least a threshold
@@ -424,24 +451,13 @@ read_ahead:
     if (space->is_stopping())
       break;
     space->reacquire();
-    if (buf_read_page_low(space, false, ibuf_mode, i, zip_size, false) ==
-        DB_SUCCESS)
+    if (buf_read_page_low(space, false, nullptr, ibuf_mode, i, zip_size,
+                          false) == DB_SUCCESS)
       count++;
   }
 
   if (count)
-  {
-    mariadb_increment_pages_prefetched(count);
-    DBUG_PRINT("ib_buf", ("random read-ahead %zu pages from %s: %u",
-			  count, space->chain.start->name,
-			  low.page_no()));
-    mysql_mutex_lock(&buf_pool.mutex);
-    /* Read ahead is considered one I/O operation for the purpose of
-    LRU policy decision. */
-    buf_LRU_stat_inc_io();
-    buf_pool.stat.n_ra_pages_read_rnd+= count;
-    mysql_mutex_unlock(&buf_pool.mutex);
-  }
+    buf_read_ahead_report(*space, count);
 
   space->release();
   return count;
@@ -461,7 +477,7 @@ dberr_t buf_read_page(const page_id_t page_id, bool unzip) noexcept
   }
 
   buf_LRU_stat_inc_io(); /* NOT protected by buf_pool.mutex */
-  return buf_read_page_low(space, true, BUF_READ_ANY_PAGE,
+  return buf_read_page_low(space, true, current_thd, BUF_READ_ANY_PAGE,
                            page_id, space->zip_size(), unzip);
 }
 
@@ -475,7 +491,7 @@ released by the i/o-handler thread.
 void buf_read_page_background(fil_space_t *space, const page_id_t page_id,
                               ulint zip_size) noexcept
 {
-	buf_read_page_low(space, false, BUF_READ_ANY_PAGE,
+	buf_read_page_low(space, false, nullptr, BUF_READ_ANY_PAGE,
 			  page_id, zip_size, false);
 
 	/* We do not increment number of I/O operations used for LRU policy
@@ -660,24 +676,13 @@ failed:
     if (space->is_stopping())
       break;
     space->reacquire();
-    if (buf_read_page_low(space, false, ibuf_mode, new_low, zip_size, false) ==
-        DB_SUCCESS)
+    if (buf_read_page_low(space, false, nullptr, ibuf_mode, new_low, zip_size,
+                          false) == DB_SUCCESS)
       count++;
   }
 
   if (count)
-  {
-    mariadb_increment_pages_prefetched(count);
-    DBUG_PRINT("ib_buf", ("random read-ahead %zu pages from %s: %u",
-                          count, space->chain.start->name,
-                          new_low.page_no()));
-    mysql_mutex_lock(&buf_pool.mutex);
-    /* Read ahead is considered one I/O operation for the purpose of
-    LRU policy decision. */
-    buf_LRU_stat_inc_io();
-    buf_pool.stat.n_ra_pages_read+= count;
-    mysql_mutex_unlock(&buf_pool.mutex);
-  }
+    buf_read_ahead_report(*space, count);
 
   space->release();
   return count;
@@ -706,7 +711,8 @@ void buf_read_recover(fil_space_t *space, const page_id_t page_id,
                              IORequest::READ_ASYNC}, ptrdiff_t(init));
     }
   }
-  else if (dberr_t err= buf_read_page_low(space, false, BUF_READ_ANY_PAGE,
+  else if (dberr_t err= buf_read_page_low(space, false, nullptr,
+                                          BUF_READ_ANY_PAGE,
                                           page_id, zip_size, true))
   {
     if (err != DB_SUCCESS_LOCKED_REC)
