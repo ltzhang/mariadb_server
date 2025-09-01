@@ -291,8 +291,7 @@ stored in undo log
 @param[in]	clust_offsets	offsets on the cluster record
 @param[in]	index		the secondary index
 @param[in]	ientry		the secondary index entry
-@param[in]	roll_ptr	the rollback pointer for the purging record
-@param[in]	trx_id		trx id for the purging record
+@param[in]	node		purge node
 @param[in,out]	mtr		mini-transaction
 @param[in,out]	v_row		dtuple holding the virtual rows (if needed)
 @return true if matches, false otherwise */
@@ -305,8 +304,7 @@ row_purge_vc_matches_cluster(
 	rec_offs*	clust_offsets,
 	dict_index_t*	index,
 	const dtuple_t* ientry,
-	roll_ptr_t	roll_ptr,
-	trx_id_t	trx_id,
+	const purge_node_t&node,
 	mtr_t*		mtr,
 	dtuple_t**	vrow)
 {
@@ -369,11 +367,11 @@ row_purge_vc_matches_cluster(
 			version, clust_index, clust_offsets);
 
 		ut_ad(cur_roll_ptr != 0);
-		ut_ad(roll_ptr != 0);
+		ut_ad(node.roll_ptr != 0);
 
 		trx_undo_prev_version_build(
 			version, clust_index, clust_offsets,
-			heap, &prev_version, mtr,
+			heap, &prev_version, mtr, node.trx,
 			TRX_UNDO_PREV_IN_PURGE | TRX_UNDO_GET_OLD_V_VALUE,
 			nullptr, vrow);
 
@@ -436,10 +434,10 @@ row_purge_vc_matches_cluster(
 			}
 		}
 
-		trx_id_t	rec_trx_id = row_get_rec_trx_id(
-			prev_version, clust_index, clust_offsets);
-
-		if (rec_trx_id < trx_id || roll_ptr == cur_roll_ptr) {
+		if (node.roll_ptr == cur_roll_ptr
+		    || row_get_rec_trx_id(
+			prev_version, clust_index, clust_offsets)
+		    < node.trx_id) {
 			break;
 		}
 
@@ -575,8 +573,7 @@ static bool row_purge_is_unsafe(const purge_node_t &node,
 				if (entry && row_purge_vc_matches_cluster(
 					    rec, entry,
 					    clust_index, clust_offsets,
-					    index, ientry, roll_ptr,
-					    trx_id, mtr, &vrow)) {
+					    index, ientry, node, mtr, &vrow)) {
 					goto unsafe_to_purge;
 				}
 			}
@@ -628,7 +625,7 @@ unsafe_to_purge:
 
 		cur_vrow = row_vers_build_cur_vrow(
 			rec, clust_index, &clust_offsets,
-			index, trx_id, roll_ptr, heap, v_heap, mtr);
+			index, trx_id, roll_ptr, heap, v_heap, mtr, node.trx);
 	}
 
 	version = rec;
@@ -640,7 +637,7 @@ unsafe_to_purge:
 
 		trx_undo_prev_version_build(version,
 					    clust_index, clust_offsets,
-					    heap, &prev_version, mtr,
+					    heap, &prev_version, mtr, node.trx,
 					    TRX_UNDO_CHECK_PURGE_PAGES,
 					    nullptr,
 					    dict_index_has_virtual(index)
@@ -798,10 +795,10 @@ static bool row_purge_remove_sec_if_poss_tree(purge_node_t *node,
 	log_free_check();
 #ifdef ENABLED_DEBUG_SYNC
 	DBUG_EXECUTE_IF("enable_row_purge_sec_tree_sync",
-		debug_sync_set_action(current_thd, STRING_WITH_LEN(
+		debug_sync_set_action(node->trx->mysql_thd, STRING_WITH_LEN(
 			"now SIGNAL "
 			"purge_sec_tree_begin"));
-		debug_sync_set_action(current_thd, STRING_WITH_LEN(
+		debug_sync_set_action(node->trx->mysql_thd, STRING_WITH_LEN(
 			"now WAIT_FOR "
 			"purge_sec_tree_execute"));
 	);
@@ -1035,16 +1032,14 @@ row_purge_remove_sec_if_poss(
       ut_a(--n_tries);
 }
 
-/***********************************************************//**
+/**
 Purges a delete marking of a record.
+@param node   row purge node
 @retval true if the row was not found, or it was successfully removed
 @retval false the purge needs to be suspended because of
 running out of file space */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
-bool
-row_purge_del_mark(
-/*===============*/
-	purge_node_t*	node)	/*!< in/out: row purge node */
+bool row_purge_del_mark(purge_node_t *node) noexcept
 {
   if (node->index)
   {
@@ -1072,7 +1067,7 @@ row_purge_del_mark(
 #ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("enable_row_purge_del_mark_exit_sync_point",
                   debug_sync_set_action
-                  (current_thd,
+                  (node->trx->mysql_thd,
                    STRING_WITH_LEN("now SIGNAL row_purge_del_mark_finished"));
                   );
 #endif
@@ -1085,11 +1080,8 @@ Purges an update of an existing record. Also purges an update of a delete
 marked record if that record contained an externally stored field. */
 static
 void
-row_purge_upd_exist_or_extern_func(
-/*===============================*/
-#ifdef UNIV_DEBUG
+row_purge_upd_exist_or_extern(
 	const que_thr_t*thr,		/*!< in: query thread */
-#endif /* UNIV_DEBUG */
 	purge_node_t*	node,		/*!< in: row purge node */
 	const trx_undo_rec_t*	undo_rec)	/*!< in: record to purge */
 {
@@ -1121,7 +1113,8 @@ row_purge_upd_exist_or_extern_func(
 			dtuple_t*	entry = row_build_index_entry_low(
 				node->row, NULL, node->index,
 				heap, ROW_BUILD_FOR_PURGE);
-			row_purge_remove_sec_if_poss(node, node->index, entry);
+			row_purge_remove_sec_if_poss(
+				node, node->index, entry);
 
 			ut_ad(node->table);
 
@@ -1210,14 +1203,6 @@ skip_secondaries:
 		}
 	}
 }
-
-#ifdef UNIV_DEBUG
-# define row_purge_upd_exist_or_extern(thr,node,undo_rec)	\
-	row_purge_upd_exist_or_extern_func(thr,node,undo_rec)
-#else /* UNIV_DEBUG */
-# define row_purge_upd_exist_or_extern(thr,node,undo_rec)	\
-	row_purge_upd_exist_or_extern_func(node,undo_rec)
-#endif /* UNIV_DEBUG */
 
 /** Build a partial row from an update undo log record for purge.
 Any columns which occur as ordering in any index of the table are present.
@@ -1467,12 +1452,10 @@ row_purge_parse_undo_rec(
 @return true if purged, false if skipped */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
-row_purge_record_func(
+row_purge_record(
 	purge_node_t*	node,
 	const trx_undo_rec_t*	undo_rec,
-#if defined UNIV_DEBUG || defined WITH_WSREP
 	const que_thr_t*thr,
-#endif /* UNIV_DEBUG || WITH_WSREP */
 	bool		updated_extern)
 {
 	ut_ad(!node->found_clust);
@@ -1520,14 +1503,6 @@ row_purge_record_func(
 
 	return(purged);
 }
-
-#if defined UNIV_DEBUG || defined WITH_WSREP
-# define row_purge_record(node,undo_rec,thr,updated_extern)	\
-	row_purge_record_func(node,undo_rec,thr,updated_extern)
-#else /* UNIV_DEBUG || WITH_WSREP */
-# define row_purge_record(node,undo_rec,thr,updated_extern)	\
-	row_purge_record_func(node,undo_rec,updated_extern)
-#endif /* UNIV_DEBUG || WITH_WSREP */
 
 /***********************************************************//**
 Fetches an undo log record and does the purge for the recorded operation.

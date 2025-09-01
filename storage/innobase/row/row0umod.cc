@@ -479,10 +479,12 @@ corresponds to a secondary index entry.
 @param index  secondary index
 @param ientry secondary index entry
 @param mtr    mini-transaction
+@param trx    transaction connected to current_thd
 @return whether an accessible non-dete-marked version of rec
 corresponds to ientry */
 static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
-                                       const dtuple_t *ientry, mtr_t *mtr)
+                                       const dtuple_t *ientry, mtr_t *mtr,
+                                       trx_t *trx)
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
@@ -514,7 +516,7 @@ static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
 
 		cur_vrow = row_vers_build_cur_vrow(
 			rec, clust_index, &clust_offsets,
-			index, 0, 0, heap, v_heap, mtr);
+			index, 0, 0, heap, v_heap, mtr, trx);
 	}
 
 	version = rec;
@@ -526,8 +528,8 @@ static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
 
 		trx_undo_prev_version_build(version,
 					    clust_index, clust_offsets,
-					    heap, &prev_version,
-					    mtr, TRX_UNDO_CHECK_PURGEABILITY,
+					    heap, &prev_version, mtr, trx,
+					    TRX_UNDO_CHECK_PURGEABILITY,
 					    nullptr,
 					    dict_index_has_virtual(index)
 					    ? &vrow : nullptr);
@@ -701,7 +703,8 @@ found:
 	clustered index entry, because there is no MVCC or purge. */
 	if (node->table->is_temporary()
 	    || row_undo_mod_sec_is_unsafe(
-		       btr_pcur_get_rec(&node->pcur), index, entry, &mtr)) {
+		       btr_pcur_get_rec(&node->pcur), index, entry, &mtr,
+		       thr->graph->trx)) {
 		btr_rec_set_deleted<true>(btr_cur_get_block(btr_cur),
 					  btr_cur_get_rec(btr_cur), &mtr);
 	} else {

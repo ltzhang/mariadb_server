@@ -2069,7 +2069,7 @@ static dberr_t trx_undo_prev_version(const rec_t *rec, dict_index_t *index,
                                      const trx_undo_rec_t *undo_rec);
 
 inline const buf_block_t *
-purge_sys_t::view_guard::get(const page_id_t id, mtr_t *mtr)
+purge_sys_t::view_guard::get(const page_id_t id, trx_t *trx, mtr_t *mtr)
 {
   buf_block_t *block;
   ut_ad(mtr->is_active());
@@ -2083,7 +2083,7 @@ purge_sys_t::view_guard::get(const page_id_t id, mtr_t *mtr)
       return block;
     }
   }
-  block= buf_pool.page_fix(id);
+  block= buf_pool.page_fix(id, trx);
   if (block)
   {
     mtr->memo_push(block, MTR_MEMO_BUF_FIX);
@@ -2106,6 +2106,7 @@ must hold a latch on the index page of the clustered index record.
                  version, or if history data has been deleted (an error),
                  or if the purge could have removed the version though
                  it has not yet done so
+@param trx       transaction connected to current_thd
 @param mtr       mini-transaction
 @param v_status  TRX_UNDO_PREV_IN_PURGE, ...
 @param v_heap    memory heap used to create vrow dtuple if it is not yet
@@ -2119,7 +2120,7 @@ or if it was an insert or the undo record refers to the table before rebuild
 TRANSACTIONAL_TARGET
 dberr_t trx_undo_prev_version_build(const rec_t *rec, dict_index_t *index,
                                     rec_offs *offsets, mem_heap_t *heap,
-                                    rec_t **old_vers, mtr_t *mtr,
+                                    rec_t **old_vers, mtr_t *mtr, trx_t *trx,
                                     ulint v_status,
                                     mem_heap_t *v_heap, dtuple_t **vrow)
 {
@@ -2141,11 +2142,9 @@ dberr_t trx_undo_prev_version_build(const rec_t *rec, dict_index_t *index,
 
   ut_ad(!index->table->skip_alter_undo);
 
-  // FIXME: take trx as a parameter
-  if (THD *thd= current_thd)
-    if (trx_t *trx= thd_to_trx(thd))
-      if (ha_handler_stats *stats= trx->active_handler_stats)
-        stats->undo_records_read++;
+  if (!trx);
+  else if (ha_handler_stats *stats= trx->active_handler_stats)
+    stats->undo_records_read++;
   const auto savepoint= mtr->get_savepoint();
   dberr_t err= DB_MISSING_HISTORY;
   purge_sys_t::view_guard check{v_status == TRX_UNDO_CHECK_PURGE_PAGES
@@ -2161,7 +2160,7 @@ dberr_t trx_undo_prev_version_build(const rec_t *rec, dict_index_t *index,
     if (const buf_block_t *undo_page=
         check.get(page_id_t{trx_sys.rseg_array[(roll_ptr >> 48) & 0x7f].
                             space->id,
-                            uint32_t(roll_ptr >> 16)}, mtr))
+                            uint32_t(roll_ptr >> 16)}, trx, mtr))
     {
       static_assert(ROLL_PTR_BYTE_POS == 0, "");
       const uint16_t offset{uint16_t(roll_ptr)};

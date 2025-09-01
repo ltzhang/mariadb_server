@@ -925,7 +925,8 @@ ibuf_page_low(
 #ifdef UNIV_DEBUG
 	if (x_latch) {
 	} else if (buf_block_t* block = buf_pool.page_fix(
-			   ibuf_bitmap_page_no_calc(page_id, zip_size))) {
+			   ibuf_bitmap_page_no_calc(page_id, zip_size),
+			   current_thd ? thd_to_trx(current_thd) : nullptr)) {
 		local_mtr.start();
 		local_mtr.memo_push(block, MTR_MEMO_BUF_FIX);
 		/* We got the bitmap page without a page latch, so that

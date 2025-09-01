@@ -2161,7 +2161,7 @@ dberr_t PageConverter::operator()(buf_block_t* block) UNIV_NOTHROW
   /* If we already had an old page with matching number in the buffer
   pool, evict it now, because we no longer evict the pages on
   DISCARD TABLESPACE. */
-  if (buf_block_t *b= buf_pool.page_fix(block->page.id(), nullptr,
+  if (buf_block_t *b= buf_pool.page_fix(block->page.id(), nullptr, nullptr,
                                         buf_pool_t::FIX_ALSO_FREED))
   {
     ut_ad(!b->page.oldest_modification());

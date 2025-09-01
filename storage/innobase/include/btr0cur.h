@@ -758,10 +758,11 @@ struct btr_cur_t {
   all sibling pages on the way.
   @param tuple      key to search for, with correct n_fields_cmp
   @param mode       search mode; PAGE_CUR_LE for unique prefix or for inserting
+  @param trx        transaction associated with current_thd
   @param mtr        mini-transaction
   @return error code */
   dberr_t pessimistic_search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
-                                  mtr_t *mtr);
+                                  trx_t *trx, mtr_t *mtr);
 
   /** Open the cursor at a random leaf page record.
   @param offsets   temporary memory for rec_get_offsets()

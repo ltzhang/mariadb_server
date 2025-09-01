@@ -966,17 +966,19 @@ static inline page_cur_mode_t btr_cur_nonleaf_mode(page_cur_mode_t mode)
   return PAGE_CUR_LE;
 }
 
-MY_ATTRIBUTE((nonnull,warn_unused_result))
+MY_ATTRIBUTE((nonnull(3,5),warn_unused_result))
 /** Acquire a latch on the previous page without violating the latching order.
 @param rw_latch the latch on block (RW_S_LATCH or RW_X_LATCH)
 @param page_id  page identifier with valid space identifier
 @param err      error code
+@param trx      transaction attached to current connection
 @param mtr      mini-transaction
 @retval 0  if an error occurred
 @retval 1  if the page could be latched in the wrong order
 @retval -1 if the latch on block was temporarily released */
 static int btr_latch_prev(rw_lock_type_t rw_latch,
-                          page_id_t page_id, dberr_t *err, mtr_t *mtr)
+                          page_id_t page_id, dberr_t *err, trx_t *trx,
+                          mtr_t *mtr) noexcept
 {
   ut_ad(rw_latch == RW_S_LATCH || rw_latch == RW_X_LATCH);
 
@@ -999,7 +1001,8 @@ static int btr_latch_prev(rw_lock_type_t rw_latch,
 
  retry:
   int ret= 1;
-  buf_block_t *prev= buf_pool.page_fix(page_id, err, buf_pool_t::FIX_NOWAIT);
+  buf_block_t *prev=
+    buf_pool.page_fix(page_id, err, trx, buf_pool_t::FIX_NOWAIT);
   if (UNIV_UNLIKELY(!prev))
     return 0;
   if (prev == reinterpret_cast<buf_block_t*>(-1))
@@ -1016,7 +1019,7 @@ static int btr_latch_prev(rw_lock_type_t rw_latch,
     else
       block->page.lock.x_unlock();
 
-    prev= buf_pool.page_fix(page_id, err, buf_pool_t::FIX_WAIT_READ);
+    prev= buf_pool.page_fix(page_id, err, trx, buf_pool_t::FIX_WAIT_READ);
 
     if (!prev)
     {
@@ -1093,6 +1096,8 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
   ut_ad(index()->is_btree() || index()->is_ibuf());
   ut_ad(!index()->is_ibuf() || ibuf_inside(mtr));
 
+  THD *const thd{current_thd};
+  trx_t *const trx{thd ? thd_to_trx(thd) : nullptr};
   buf_block_t *guess;
   btr_op_t btr_op;
   btr_intention_t lock_intention;
@@ -1473,7 +1478,7 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
 
       /* latch also siblings from left to right */
       if (page_has_prev(block->page.frame) &&
-          !btr_latch_prev(rw_latch, page_id, &err, mtr))
+          !btr_latch_prev(rw_latch, page_id, &err, trx, mtr))
         goto func_exit;
       if (page_has_next(block->page.frame) &&
           !btr_block_get(*index(), btr_page_get_next(block->page.frame),
@@ -1498,7 +1503,7 @@ release_tree:
       ut_ad(rw_latch == RW_X_LATCH);
       /* x-latch also siblings from left to right */
       if (page_has_prev(block->page.frame) &&
-          !btr_latch_prev(rw_latch, page_id, &err, mtr))
+          !btr_latch_prev(rw_latch, page_id, &err, trx, mtr))
         goto func_exit;
       if (page_has_next(block->page.frame) &&
           !btr_block_get(*index(), btr_page_get_next(block->page.frame),
@@ -1571,7 +1576,7 @@ release_tree:
       delete intention, it might cause node_ptr insert for the upper
       level. We should change the intention and retry. */
     need_opposite_intention:
-      return pessimistic_search_leaf(tuple, mode, mtr);
+      return pessimistic_search_leaf(tuple, mode, trx, mtr);
 
     if (detected_same_key_root || lock_intention != BTR_INTENTION_BOTH ||
         index()->is_unique() ||
@@ -1655,7 +1660,7 @@ release_tree:
 
         /* Latch the previous page if the node pointer is the leftmost
         of the current page. */
-        int ret= btr_latch_prev(rw_latch, page_id, &err, mtr);
+        int ret= btr_latch_prev(rw_latch, page_id, &err, trx, mtr);
         if (!ret)
           goto func_exit;
         ut_ad(block_savepoint + 2 == mtr->get_savepoint());
@@ -1733,7 +1738,8 @@ static void btr_cur_nonleaf_make_young(buf_page_t *bpage)
 
 ATTRIBUTE_COLD
 dberr_t btr_cur_t::pessimistic_search_leaf(const dtuple_t *tuple,
-                                           page_cur_mode_t mode, mtr_t *mtr)
+                                           page_cur_mode_t mode,
+                                           trx_t *trx, mtr_t *mtr)
 {
   ut_ad(index()->is_btree() || index()->is_ibuf());
   ut_ad(!index()->is_ibuf() || ibuf_inside(mtr));
@@ -1840,7 +1846,7 @@ dberr_t btr_cur_t::pessimistic_search_leaf(const dtuple_t *tuple,
 #endif /* UNIV_ZIP_DEBUG */
 
   if (page_has_prev(block->page.frame) &&
-      !btr_latch_prev(RW_X_LATCH, page_id, &err, mtr))
+      !btr_latch_prev(RW_X_LATCH, page_id, &err, trx, mtr))
     goto func_exit;
   if (page_has_next(block->page.frame) &&
       !btr_block_get(*index(), btr_page_get_next(block->page.frame),
@@ -2098,7 +2104,9 @@ index_locked:
         {
           /* x-latch also siblings from left to right */
           if (page_has_prev(block->page.frame) &&
-              !btr_latch_prev(RW_X_LATCH, block->page.id(), &err, mtr))
+              !btr_latch_prev(RW_X_LATCH, block->page.id(), &err,
+                              current_thd ? thd_to_trx(current_thd) : nullptr,
+                              mtr))
             break;
           if (page_has_next(block->page.frame) &&
               !btr_block_get(*index, btr_page_get_next(block->page.frame),

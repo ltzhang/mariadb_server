@@ -305,6 +305,8 @@ class UndorecApplier
   const trx_id_t trx_id;
   /** Update vector */
   upd_t *update;
+  /** transaction */
+  trx_t &trx;
   /** memory heap which can be used to build previous version of
   the index record and its offsets */
   mem_heap_t *heap;
@@ -312,8 +314,8 @@ class UndorecApplier
   mtr_t mtr;
 
 public:
-  UndorecApplier(page_id_t page_id, trx_id_t trx_id) :
-    page_id(page_id), trx_id(trx_id), heap(mem_heap_create(100))
+  UndorecApplier(page_id_t page_id, trx_t &trx) :
+    page_id(page_id), trx_id(trx.id), trx(trx), heap(mem_heap_create(100))
   {
   }
 

@@ -83,6 +83,7 @@ row_vers_build_clust_v_col(
 @param[in,out]	heap		heap memory
 @param[in,out]	v_heap		heap memory to keep virtual column tuple
 @param[in,out]	mtr		mini-transaction
+@param[in,out]	trx		transaction associated with current_thd
 @return dtuple contains virtual column data */
 dtuple_t*
 row_vers_build_cur_vrow(
@@ -94,7 +95,8 @@ row_vers_build_cur_vrow(
 	roll_ptr_t		roll_ptr,
 	mem_heap_t*		heap,
 	mem_heap_t*		v_heap,
-	mtr_t*			mtr);
+	mtr_t*			mtr,
+	trx_t*			trx);
 
 /*****************************************************************//**
 Constructs the version of a clustered index record which a consistent

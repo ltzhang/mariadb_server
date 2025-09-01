@@ -6235,6 +6235,8 @@ dberr_t row_check_index(row_prebuilt_t *prebuilt, ulint *n_rows)
   mem_heap_t *heap= mem_heap_create(100);
 
   dtuple_t *prev_entry= nullptr;
+  trx_t *const trx{prebuilt->trx};
+  THD *const thd{prebuilt->trx->mysql_thd};
   mtr_t mtr;
   mtr.start();
 
@@ -6257,10 +6259,10 @@ func_exit:
   ReadView &view=
     prebuilt->need_to_access_clustered &&
     !prebuilt->table->is_temporary() &&
-    prebuilt->trx->isolation_level != TRX_ISO_READ_UNCOMMITTED
-    ? check_table_extended_view : prebuilt->trx->read_view;
+    trx->isolation_level != TRX_ISO_READ_UNCOMMITTED
+    ? check_table_extended_view : trx->read_view;
   if (&view == &check_table_extended_view)
-    check_table_extended_view.set_creator_trx_id(prebuilt->trx->id);
+    check_table_extended_view.set_creator_trx_id(trx->id);
 
 page_loop:
   if (&view == &check_table_extended_view)
@@ -6302,7 +6304,7 @@ rec_loop:
     if (btr_pcur_is_after_last_in_tree(prebuilt->pcur))
       goto func_exit;
     err= btr_pcur_move_to_next_page(prebuilt->pcur, &mtr);
-    if (err == DB_SUCCESS && trx_is_interrupted(prebuilt->trx))
+    if (err == DB_SUCCESS && trx_is_interrupted(trx))
       err= DB_INTERRUPTED;
     if (UNIV_UNLIKELY(err != DB_SUCCESS))
       goto func_exit;
@@ -6320,8 +6322,7 @@ rec_loop:
   {
     if (*n_rows || !index->is_instant())
     {
-      push_warning_printf(prebuilt->trx->mysql_thd,
-                          Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
+      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
                           "InnoDB: invalid record encountered");
       prebuilt->autoinc_error= DB_INDEX_CORRUPT;
     }
@@ -6336,18 +6337,17 @@ rec_loop:
   }
   else if (index->is_clust())
   {
-    if (prebuilt->trx->isolation_level == TRX_ISO_READ_UNCOMMITTED)
+    if (trx->isolation_level == TRX_ISO_READ_UNCOMMITTED)
       goto count_or_not;
 
     trx_id_t rec_trx_id= row_get_rec_trx_id(rec, index, offsets);
 
-    if (rec_trx_id >= prebuilt->trx->read_view.low_limit_id() &&
+    if (rec_trx_id >= trx->read_view.low_limit_id() &&
         UNIV_UNLIKELY(rec_trx_id >= trx_sys.get_max_trx_id()))
     {
     invalid_trx_id:
       if (prebuilt->autoinc_error == DB_SUCCESS)
-        push_warning_printf(prebuilt->trx->mysql_thd,
-                            Sql_condition::WARN_LEVEL_WARN,
+        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                             ER_NOT_KEYFILE,
                             "InnoDB: DB_TRX_ID=" TRX_ID_FMT
                             " exceeds the system-wide maximum",
@@ -6356,7 +6356,7 @@ rec_loop:
       goto next_rec;
     }
 
-    if (!prebuilt->trx->read_view.changes_visible(rec_trx_id))
+    if (!trx->read_view.changes_visible(rec_trx_id))
     {
       ut_ad(srv_force_recovery < SRV_FORCE_NO_UNDO_LOG_SCAN);
       rec_t *old_vers;
@@ -6372,7 +6372,7 @@ rec_loop:
         rec= old_vers;
         rec_trx_id= row_get_rec_trx_id(rec, index, offsets);
 
-        if (rec_trx_id >= prebuilt->trx->read_view.low_limit_id() &&
+        if (rec_trx_id >= trx->read_view.low_limit_id() &&
             UNIV_UNLIKELY(rec_trx_id >= trx_sys.get_max_trx_id()))
           goto invalid_trx_id;
 
@@ -6393,8 +6393,7 @@ rec_loop:
         << index->table->name << ": "
         << rec_offsets_print(rec, offsets);
       prebuilt->autoinc_error= DB_MISSING_HISTORY;
-      push_warning_printf(prebuilt->trx->mysql_thd,
-                          Sql_condition::WARN_LEVEL_WARN,
+      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                           ER_NOT_KEYFILE, "InnoDB: %s", w.m_oss.str().c_str());
     }
 
@@ -6405,7 +6404,7 @@ rec_loop:
   {
     if (page_trx_id >= trx_sys.get_max_trx_id())
       goto invalid_PAGE_MAX_TRX_ID;
-    if (prebuilt->trx->isolation_level == TRX_ISO_READ_UNCOMMITTED);
+    if (trx->isolation_level == TRX_ISO_READ_UNCOMMITTED);
     else if (&view == &check_table_extended_view || rec_deleted ||
              !view.sees(page_trx_id))
     {
@@ -6450,8 +6449,7 @@ rec_loop:
             w << "Clustered index record not found for index "
               << index->name << " of table " << index->table->name
               << ": " << rec_offsets_print(rec, offsets);
-            push_warning_printf(prebuilt->trx->mysql_thd,
-                                Sql_condition::WARN_LEVEL_WARN,
+            push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                                 ER_NOT_KEYFILE, "InnoDB: %s",
                                 w.m_oss.str().c_str());
           }
@@ -6552,7 +6550,7 @@ rec_loop:
         got_extended_match= err == DB_SUCCESS;
         err= DB_SUCCESS;
 
-        if (!prebuilt->trx->read_view.changes_visible(rec_trx_id))
+        if (!trx->read_view.changes_visible(rec_trx_id))
           /* While CHECK TABLE ... EXTENDED checks for a matching
           clustered index record version for each secondary index
           record, it must count only those records that belong to its
@@ -6590,8 +6588,7 @@ rec_loop:
         {
         invalid_rec_trx_id:
           if (prebuilt->autoinc_error == DB_SUCCESS)
-            push_warning_printf(prebuilt->trx->mysql_thd,
-                                Sql_condition::WARN_LEVEL_WARN,
+            push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                                 ER_NOT_KEYFILE,
                                 "InnoDB: DB_TRX_ID=" TRX_ID_FMT
                                 " exceeds the system-wide maximum",
@@ -6617,7 +6614,8 @@ rec_loop:
           err= trx_undo_prev_version_build(clust_rec,
                                            clust_index, clust_offsets,
                                            vers_heap, &old_vers,
-                                           &mtr, 0, nullptr, nullptr);
+                                           &mtr, trx,
+                                           0, nullptr, nullptr);
           if (prev_heap)
             mem_heap_free(prev_heap);
           if (err != DB_SUCCESS)
@@ -6665,7 +6663,7 @@ rec_loop:
                                          clust_offsets);
 
           if (UNIV_UNLIKELY(rec_trx_id >=
-                            prebuilt->trx->read_view.low_limit_id() &&
+                            trx->read_view.low_limit_id() &&
                             rec_trx_id >= trx_sys.get_max_trx_id()))
           {
             mem_heap_free(vers_heap);
@@ -6673,11 +6671,11 @@ rec_loop:
           }
 
           const bool rec_visible=
-            prebuilt->trx->read_view.changes_visible(rec_trx_id);
+            trx->read_view.changes_visible(rec_trx_id);
           const bool clust_rec_deleted=
             rec_get_deleted_flag(clust_rec, prebuilt->table->not_redundant());
 
-          if (&view != &prebuilt->trx->read_view)
+          if (&view != &trx->read_view)
           {
             /* It is not safe to fetch BLOBs of committed delete-marked
             records that may have been freed in purge. */
@@ -6753,7 +6751,7 @@ rec_loop:
                                          ULINT_UNDEFINED, &heap);
       check_match:
         /* This clustered index record version exists in
-        prebuilt->trx->read_view and is not delete-marked.
+        trx->read_view and is not delete-marked.
         By design, any BLOBs in it are not allowed to be
         freed in the purge of committed transaction history. */
         err= row_check_index_match(prebuilt, clust_rec, clust_index,
@@ -6777,8 +6775,7 @@ rec_loop:
   invalid_PAGE_MAX_TRX_ID:
     if (UNIV_LIKELY(srv_force_recovery < SRV_FORCE_NO_UNDO_LOG_SCAN))
     {
-      push_warning_printf(prebuilt->trx->mysql_thd,
-                          Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
+      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
                           "InnoDB: Invalid PAGE_MAX_TRX_ID=%" PRIu64
                           " in index '%-.200s'",
                           page_trx_id, index->name());

@@ -353,11 +353,12 @@ ATTRIBUTE_COLD void trx_t::apply_log()
     return;
   const page_id_t page_id{rsegs.m_redo.rseg->space->id, undo->hdr_page_no};
   page_id_t next_page_id(page_id);
-  buf_block_t *block= buf_pool.page_fix(page_id, nullptr, buf_pool_t::FIX_WAIT_READ);
+  buf_block_t *block=
+    buf_pool.page_fix(page_id, nullptr, this, buf_pool_t::FIX_WAIT_READ);
   if (UNIV_UNLIKELY(!block))
     return;
 
-  UndorecApplier log_applier(page_id, id);
+  UndorecApplier log_applier(page_id, *this);
 
   for (;;)
   {
@@ -380,7 +381,8 @@ ATTRIBUTE_COLD void trx_t::apply_log()
     if (next == FIL_NULL)
       break;
     next_page_id.set_page_no(next);
-    block= buf_pool.page_fix(next_page_id, nullptr, buf_pool_t::FIX_WAIT_READ);
+    block= buf_pool.page_fix(next_page_id, nullptr, this,
+                             buf_pool_t::FIX_WAIT_READ);
     if (UNIV_UNLIKELY(!block))
       break;
     log_applier.assign_next(next_page_id);
