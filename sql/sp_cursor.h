@@ -101,6 +101,8 @@ public:
 
   int open(THD *thd, bool check_max_open_cursor_counter= true);
 
+  int open_from_ps(THD *thd, Prepared_statement *stmt);
+
   int close(THD *thd);
 
   my_bool is_open() const

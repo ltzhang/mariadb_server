@@ -1,0 +1,191 @@
+#
+# MDEV-33830 Support for cursors on prepared statements
+#
+# OPEN with a never prepared stmt
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE c CURSOR FOR stmt;
+OPEN c;
+END;
+$$
+CALL p1;
+ERROR HY000: Unknown prepared statement handler (stmt) given to <dynamic open statement>
+DROP PROCEDURE p1;
+# OPEN with a deallocated stmt
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT 1';
+DEALLOCATE PREPARE stmt;
+OPEN c;
+END;
+$$
+CALL p1;
+ERROR HY000: Unknown prepared statement handler (stmt) given to <dynamic open statement>
+DROP PROCEDURE p1;
+# OPEN with a non-SELECT statement
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'DROP TABLE t1';
+OPEN c;
+END;
+$$
+CALL p1;
+ERROR 42000: Cursor statement must be a SELECT
+DROP PROCEDURE p1;
+# A single FETCH from a simple SELECT without tables
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE v1 INT;
+DECLARE v2 TEXT;
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT 123, ''v123''';
+OPEN c;
+FETCH c INTO v1, v2;
+SELECT v1, v2;
+CLOSE c;
+END;
+$$
+CALL p1;
+v1	v2
+123	v123
+DROP PROCEDURE p1;
+# A loop for FETCH with an I_S query
+CREATE PROCEDURE p1 ()
+BEGIN
+DECLARE dynamic_sql TEXT;
+DECLARE v1 INT;
+DECLARE v2 VARCHAR(64);
+DECLARE end_of_data INT DEFAULT 0;
+DECLARE c0 CURSOR FOR stmt1;
+DECLARE EXIT HANDLER FOR NOT FOUND SET end_of_data = 1;
+SET dynamic_sql='SELECT id, collation_name'
+                  ' FROM INFORMATION_SCHEMA.COLLATIONS'
+                  ' WHERE id=33 OR id=83 OR id=192'
+                  ' ORDER BY id';
+PREPARE stmt1 FROM dynamic_sql;
+OPEN c0;
+WHILE (end_of_data = 0)
+DO
+FETCH FROM c0 INTO v1, v2;
+SELECT v1, v2;
+END WHILE;
+CLOSE c0;
+END;
+$$
+CALL p1();
+v1	v2
+33	utf8mb3_general_ci
+v1	v2
+83	utf8mb3_bin
+v1	v2
+192	utf8mb3_unicode_ci
+CALL p1();
+v1	v2
+33	utf8mb3_general_ci
+v1	v2
+83	utf8mb3_bin
+v1	v2
+192	utf8mb3_unicode_ci
+DROP PROCEDURE p1;
+# A single FETCH from a table
+CREATE OR REPLACE TABLE t1 (a INT);
+INSERT INTO t1 VALUES (10);
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE v INT;
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT a FROM t1';
+OPEN c;
+FETCH c INTO v;
+SELECT v;
+CLOSE c;
+END;
+$$
+CALL p1;
+v
+10
+DROP TABLE t1;
+DROP PROCEDURE p1;
+# A single FETCH from a stored function
+CREATE FUNCTION f1() RETURNS INT RETURN 123;
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE v INT;
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT f1()';
+OPEN c;
+FETCH c INTO v;
+SELECT v;
+CLOSE c;
+END;
+$$
+CALL p1;
+v
+123
+DROP FUNCTION f1;
+DROP PROCEDURE p1;
+# Fetching from an arbitrary two row dynamic SQL passed as a parameter
+CREATE TABLE t1 (a INT, b TEXT);
+INSERT INTO t1 VALUES (1,'b1'), (2, 'b2');
+CREATE FUNCTION f1(p INT) RETURNS INT RETURN p;
+CREATE FUNCTION f2(p TEXT) RETURNS TEXT RETURN p;
+CREATE PROCEDURE p1 (dynamic_sql TEXT)
+BEGIN
+DECLARE v1 INT;
+DECLARE v2 VARCHAR(32);
+DECLARE end_of_data INT DEFAULT 0;
+DECLARE c0 CURSOR FOR stmt0;
+DECLARE EXIT HANDLER FOR NOT FOUND SET end_of_data = 1;
+PREPARE stmt0 FROM dynamic_sql;
+OPEN c0;
+WHILE (end_of_data = 0)
+DO
+FETCH FROM c0 INTO v1, v2;
+SELECT v1, v2;
+END WHILE;
+CLOSE c0;
+END;
+$$
+CALL p1('SELECT a,b FROM t1');
+v1	v2
+1	b1
+v1	v2
+2	b2
+CALL p1('SELECT f1(a),f2(b) FROM t1');
+v1	v2
+1	b1
+v1	v2
+2	b2
+CALL p1('SELECT a,b FROM t1 UNION ALL SELECT f1(a),f2(b) FROM t1');
+v1	v2
+1	b1
+v1	v2
+2	b2
+v1	v2
+1	b1
+v1	v2
+2	b2
+CALL p1('SELECT a,b FROM t1 UNION DISTINCT SELECT f1(a),f2(b) FROM t1');
+v1	v2
+1	b1
+v1	v2
+2	b2
+DROP PROCEDURE p1;
+DROP TABLE t1;
+DROP FUNCTION f1;
+DROP FUNCTION f2;
+# A cursor with parameters: count mismatch
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE v INT;
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT 1 FROM DUAL WHERE ?>0';
+OPEN c;
+CLOSE c;
+END;
+$$
+CALL p1;
+ERROR HY000: Incorrect arguments to <dynamic open statement>
+DROP PROCEDURE p1;

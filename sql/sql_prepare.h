@@ -89,6 +89,8 @@ void mysqld_stmt_close(THD *thd, char *packet);
 void mysql_sql_stmt_prepare(THD *thd);
 void mysql_sql_stmt_execute(THD *thd);
 void mysql_sql_stmt_execute_immediate(THD *thd);
+bool mysql_sql_stmt_open_cursor(THD *thd, const Lex_ident_sys &ps_name,
+                                class sp_cursor *c);
 void mysql_sql_stmt_close(THD *thd);
 void mysqld_stmt_fetch(THD *thd, char *packet, uint packet_length);
 void mysqld_stmt_reset(THD *thd, char *packet);

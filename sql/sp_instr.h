@@ -44,7 +44,7 @@ public:
 
   bool validate()
   {
-    DBUG_ASSERT(sql_command == SQLCOM_SELECT);
+    DBUG_ASSERT(sql_command == SQLCOM_SELECT || sql_command == SQLCOM_END);
     if (result)
     {
       my_error(ER_SP_BAD_CURSOR_SELECT, MYF(0));
@@ -81,8 +81,18 @@ public:
     return this;
   }
 
+  void set_ps_name(const Lex_ident_sys_st &ps_name)
+  {
+    m_ps_name= ps_name;
+  }
+  const Lex_ident_sys &get_ps_name() const
+  {
+    return m_ps_name;
+  }
+
 private:
   LEX_CSTRING m_expr_str;
+  Lex_ident_sys m_ps_name;
 };
 
 
@@ -351,12 +361,7 @@ public:
     m_lex->safe_to_cache_query= 0;
   }
 
-  /*
-    Return m_lex as a const pointer. "const" should be enough
-    to use in DBUG_ASSERT in sp_instr_xxx methods, e.g.:
-      DBUG_ASSERT(thd->lex == m_lex_keeper.lex());
-  */
-  const LEX *lex() const
+  LEX *lex() const
   {
     return m_lex;
   }

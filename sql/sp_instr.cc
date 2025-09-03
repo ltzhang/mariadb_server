@@ -2100,7 +2100,15 @@ int
 sp_instr_cpush::exec_core(THD *thd, uint *nextp)
 {
   sp_cursor *c = thd->spcont->get_cursor(m_cursor);
-  return c ? c->open(thd) : true;
+  if (!c)
+    return true;
+  const Lex_ident_sys &ps_name= m_lex_keeper.lex()->get_lex_for_cursor()->
+                                  get_ps_name();
+
+  if (!ps_name.is_null())
+    return mysql_sql_stmt_open_cursor(thd, ps_name, c);
+
+  return c->open(thd);
 }
 
 void
@@ -2220,7 +2228,8 @@ sp_instr_copen::execute(THD *thd, uint *nextp)
 void
 sp_instr_copen::print(String *str)
 {
-  const LEX_CSTRING *cursor_name= m_ctx->find_cursor(m_cursor);
+  const sp_pcursor *cursor= m_ctx->find_cursor(m_cursor);
+  const LEX_CSTRING *cursor_name= cursor;
 
   /* copen name@offset */
   size_t rsrv= SP_INSTR_UINT_MAXLEN+7;
@@ -2236,6 +2245,14 @@ sp_instr_copen::print(String *str)
     str->qs_append('@');
   }
   str->qs_append(m_cursor);
+  const Lex_ident_sys &ps_name= cursor->lex()->get_ps_name();
+  if (!ps_name.is_null())
+  {
+    constexpr LEX_CSTRING for_str= {STRING_WITH_LEN(" for ")};
+    str->reserve(for_str.length + ps_name.length);
+    str->qs_append(for_str.str, for_str.length);
+    str->qs_append(ps_name.str, ps_name.length);
+  }
 }
 
 

@@ -737,9 +737,18 @@ const sp_pcursor *sp_pcontext::find_cursor(uint offset) const
 }
 
 
+#include "sp_instr.h"
 bool sp_pcursor::check_param_count_with_error(uint param_count) const
 {
-  if (param_count != (m_param_context ?
+  /*
+    Don't check the number of parameters for dynamic cursors.
+    They are to be executed using:
+      OPEN c USING expr1, expr2;
+    rather than:
+      OPEN c(expr1, expr2);
+  */
+  if (lex()->get_ps_name().is_null() &&
+      param_count != (m_param_context ?
                       m_param_context->context_var_count() : 0))
   {
     my_error(ER_WRONG_PARAMCOUNT_TO_CURSOR, MYF(0), LEX_CSTRING::str);

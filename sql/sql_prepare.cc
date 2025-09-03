@@ -220,7 +220,17 @@ public:
   bool prepare(const char *packet, uint packet_length);
   bool execute_loop(String *expanded_query,
                     bool open_cursor,
+                    select_result *result,
+                    Server_side_cursor **cursor,
                     uchar *packet_arg, uchar *packet_end_arg);
+  bool execute_loop(String *expanded_query,
+                    bool open_cursor,
+                    uchar *packet_arg, uchar *packet_end_arg)
+  {
+    return execute_loop(expanded_query, open_cursor,
+                        &result, &cursor,
+                        packet_arg, packet_end_arg);
+  }
   bool execute_bulk_loop(String *expanded_query,
                          bool open_cursor,
                          uchar *packet_arg, uchar *packet_end_arg, bool multiple_ok_request);
@@ -255,7 +265,9 @@ private:
   bool set_db(const LEX_CSTRING *db);
   bool set_parameters(String *expanded_query,
                       uchar *packet, uchar *packet_end);
-  bool execute(String *expanded_query, bool open_cursor);
+  bool execute(String *expanded_query, bool open_cursor,
+               select_result *result,
+               Server_side_cursor **cursor);
   void deallocate_immediate();
   bool reprepare();
   bool validate_metadata(Prepared_statement  *copy);
@@ -2895,6 +2907,74 @@ void mysql_sql_stmt_execute_immediate(THD *thd)
 }
 
 
+int sp_cursor::open_from_ps(THD *thd, Prepared_statement *stmt)
+{
+  if (server_side_cursor)
+  {
+    my_message(ER_SP_CURSOR_ALREADY_OPEN,
+               ER_THD(thd, ER_SP_CURSOR_ALREADY_OPEN),
+               MYF(0));
+    return -1;
+  }
+
+  if (thd->open_cursors_counter() >= thd->variables.max_open_cursors)
+  {
+    my_error(ER_TOO_MANY_OPEN_CURSORS, MYF(0),
+             thd->variables.max_open_cursors);
+    return -1;
+  }
+
+  /*
+    Check the number of formal parameters match
+    the number of expressions in the USING list:
+      OPEN c USING expr1, expr2;
+    Note, Oracle style is not supported yet:
+      OPEN c(expr1, expr2);
+  */
+  if (stmt->param_count != thd->lex->prepared_stmt.param_count())
+  {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), "<dynamic open statement>");
+    return -1;
+  }
+
+String tmp;
+  if (stmt->execute_loop(&tmp, true, &result, &server_side_cursor,
+                         nullptr, nullptr))
+    return -1;
+
+  thd->open_cursors_counter_increment();
+  return 0;
+}
+
+
+bool mysql_sql_stmt_open_cursor(THD *thd, const Lex_ident_sys &ps_name,
+                                sp_cursor *c)
+{
+  Prepared_statement* stmt;
+  if (!(stmt= (Prepared_statement*) thd->stmt_map.find_by_name(&ps_name)))
+  {
+    my_error(ER_UNKNOWN_STMT_HANDLER, MYF(0),
+             static_cast<int>(ps_name.length), ps_name.str,
+             "<dynamic open statement>");
+    return true;
+  }
+  if (stmt->is_in_use())
+  {
+    my_error(ER_PS_NO_RECURSION, MYF(0));
+    return true;
+  }
+
+  if (stmt->lex->sql_command != SQLCOM_SELECT)
+  {
+    my_error(ER_SP_BAD_CURSOR_QUERY, MYF(0));
+    return true;
+  }
+  //thd->session_tracker.state_change.mark_as_changed(thd);
+
+  return c->open_from_ps(thd, stmt);
+}
+
+
 /**
   Reinit prepared statement/stored procedure before execution.
 
@@ -4408,6 +4488,8 @@ Prepared_statement::set_parameters(String *expanded_query,
 bool
 Prepared_statement::execute_loop(String *expanded_query,
                                  bool open_cursor,
+                                 select_result *result_arg,
+                                 Server_side_cursor **cursor_arg,
                                  uchar *packet,
                                  uchar *packet_end)
 {
@@ -4465,11 +4547,12 @@ reexecute:
   if (sql_command_flags() & CF_REEXECUTION_FRAGILE)
   {
     reprepare_observer.reset_reprepare_observer();
-    DBUG_ASSERT(thd->m_reprepare_observer == NULL);
+    //DBUG_ASSERT(thd->m_reprepare_observer == NULL);
     thd->m_reprepare_observer= &reprepare_observer;
   }
 
-  error= execute(expanded_query, open_cursor) || thd->is_error();
+  error= execute(expanded_query, open_cursor, result_arg, cursor_arg) ||
+         thd->is_error();
 
   thd->m_reprepare_observer= NULL;
 
@@ -4683,7 +4766,8 @@ reexecute:
       thd->m_reprepare_observer= &reprepare_observer;
     }
 
-    error= execute(expanded_query, open_cursor) || thd->is_error();
+    error= execute(expanded_query, open_cursor, &result, &cursor) ||
+                   thd->is_error();
 
     thd->m_reprepare_observer= NULL;
 
@@ -4962,7 +5046,9 @@ Prepared_statement::swap_prepared_statement(Prepared_statement *copy)
     TRUE		Error
 */
 
-bool Prepared_statement::execute(String *expanded_query, bool open_cursor)
+bool Prepared_statement::execute(String *expanded_query, bool open_cursor,
+                                 select_result *result,
+                                 Server_side_cursor **cursor)
 {
   Statement stmt_backup;
   Query_arena *old_stmt_arena;
@@ -5082,7 +5168,7 @@ bool Prepared_statement::execute(String *expanded_query, bool open_cursor)
     general_log_write(thd, COM_STMT_EXECUTE, thd->query(), thd->query_length());
 
   if (open_cursor)
-    error= mysql_open_cursor(thd, &result, &cursor);
+    error= mysql_open_cursor(thd, result, cursor);
   else
   {
     /*
@@ -5130,9 +5216,9 @@ bool Prepared_statement::execute(String *expanded_query, bool open_cursor)
     mysql_change_db(thd, (LEX_CSTRING*) &saved_cur_db_name, TRUE);
 
   /* Assert that if an error, no cursor is open */
-  DBUG_ASSERT(! (error && cursor));
+  DBUG_ASSERT(! (error && *cursor));
 
-  if (! cursor)
+  if (! *cursor)
     /*
       Pass the value false to don't restore set statement variables.
       See the next comment block for more details.

@@ -1355,6 +1355,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
         ident_table_alias
         ident_sysvar_name
         ident_for_loop_index
+        select_or_ps_name
 
 %type <lex_string_with_metadata>
         TEXT_STRING
@@ -3692,6 +3693,11 @@ sp_cursor_stmt_lex:
           }
         ;
 
+select_or_ps_name:
+          select { $$= Lex_ident_sys(); }
+        | ident { $$= $1; }
+        ;
+
 sp_cursor_stmt:
           sp_cursor_stmt_lex
           {
@@ -3700,10 +3706,11 @@ sp_cursor_stmt:
             if (Lex->main_select_push(true))
               MYSQL_YYABORT;
           }
-          remember_name select remember_end
+          remember_name select_or_ps_name remember_end
           {
             DBUG_ASSERT(Lex == $1);
             Lex->pop_select(); //main select
+            $1->set_ps_name($4);
             if (unlikely($1->stmt_finalize(thd)))
               MYSQL_YYABORT;
 	    if (Lex->is_metadata_used())

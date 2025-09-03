@@ -1,0 +1,20 @@
+#
+# MDEV-33830 Support for cursors on prepared statements
+#
+CREATE PROCEDURE p1()
+BEGIN
+DECLARE c CURSOR FOR stmt;
+PREPARE stmt FROM 'SELECT 1';
+OPEN c;
+CLOSE c;
+END;
+$$
+SHOW PROCEDURE CODE p1;
+Pos	Instruction
+0	cpush c@0
+1	stmt 96 "PREPARE stmt FROM 'SELECT 1'"
+2	copen c@0 for stmt
+3	cclose c@0
+4	cpop 1
+CALL p1;
+DROP PROCEDURE p1;
