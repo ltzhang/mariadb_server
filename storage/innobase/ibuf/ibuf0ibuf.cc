@@ -414,6 +414,15 @@ err_exit:
 		return err;
 	}
 
+	if (buf_block_t* block =
+	    buf_page_get_gen(page_id_t(IBUF_SPACE_ID,
+				       FSP_IBUF_TREE_ROOT_PAGE_NO),
+			     0, RW_X_LATCH, nullptr, BUF_GET, &mtr, &err)) {
+		root = buf_block_get_frame(block);
+	} else {
+		goto err_exit;
+	}
+
 	fseg_n_reserved_pages(*header_page,
 			      IBUF_HEADER + IBUF_TREE_SEG_HEADER
 			      + header_page->page.frame, &ibuf.seg_size, &mtr);
@@ -423,15 +432,6 @@ err_exit:
 					 1)) continue,);
 		ut_ad(ibuf.seg_size >= 2);
 	} while (0);
-
-	if (buf_block_t* block =
-	    buf_page_get_gen(page_id_t(IBUF_SPACE_ID,
-				       FSP_IBUF_TREE_ROOT_PAGE_NO),
-			     0, RW_X_LATCH, nullptr, BUF_GET, &mtr, &err)) {
-		root = buf_block_get_frame(block);
-	} else {
-		goto err_exit;
-	}
 
 	DBUG_EXECUTE_IF("ibuf_init_corrupt",
 			err = DB_CORRUPTION;
@@ -1748,6 +1748,7 @@ static inline bool ibuf_data_enough_free_for_insert()
 	inserts buffered for pages that we read to the buffer pool, without
 	any risk of running out of free space in the insert buffer. */
 
+	/* ibuf.free_list_len is NOT protected by the root page latch here */
 	return(ibuf.free_list_len >= (ibuf.size / 2) + 3 * ibuf.height);
 }
 
@@ -1762,6 +1763,8 @@ ibuf_data_too_much_free(void)
 {
 	mysql_mutex_assert_owner(&ibuf_mutex);
 
+	/* In ibuf_free_excess_pages(), ibuf.free_list_len is
+	NOT protected by the root page latch */
 	return(ibuf.free_list_len >= 3 + (ibuf.size / 2) + 3 * ibuf.height);
 }
 
@@ -1876,7 +1879,7 @@ static dberr_t ibuf_remove_free_page(bool all = false)
 	mysql_mutex_lock(&ibuf_pessimistic_insert_mutex);
 	mysql_mutex_lock(&ibuf_mutex);
 
-	if (!header_page || (!all && !ibuf_data_too_much_free())) {
+	if (!header_page) {
 early_exit:
 		mysql_mutex_unlock(&ibuf_mutex);
 		mysql_mutex_unlock(&ibuf_pessimistic_insert_mutex);
@@ -1892,7 +1895,10 @@ exit:
 		goto early_exit;
 	}
 
-	const auto root_savepoint = mtr.get_savepoint() - 1;
+	if (!all && !ibuf_data_too_much_free()) {
+		goto early_exit;
+	}
+
 	const uint32_t page_no = flst_get_last(PAGE_HEADER
 					       + PAGE_BTR_IBUF_FREE_LIST
 					       + root->page.frame).page;
@@ -1910,7 +1916,6 @@ exit:
 	because in fseg_free_page we access level 1 pages, and the root
 	is a level 2 page. */
 	root->page.lock.u_unlock();
-	mtr.lock_register(root_savepoint, MTR_MEMO_BUF_FIX);
 	ibuf_exit(&mtr);
 
 	/* Since pessimistic inserts were prevented, we know that the
@@ -1926,14 +1931,13 @@ exit:
 		header_page + IBUF_HEADER + IBUF_TREE_SEG_HEADER,
 		fil_system.sys_space, page_no, &mtr);
 
+	root->page.lock.u_lock();
+
 	if (err != DB_SUCCESS) {
 		goto func_exit;
 	}
 
 	ibuf_enter(&mtr);
-
-	mysql_mutex_lock(&ibuf_mutex);
-	mtr.upgrade_buffer_fix(root_savepoint, RW_X_LATCH);
 
 	/* Remove the page from the free list and update the ibuf size data */
 	if (buf_block_t* block =
@@ -1954,8 +1958,6 @@ exit:
 	}
 
 func_exit:
-	mysql_mutex_unlock(&ibuf_mutex);
-
 	if (bitmap_page) {
 		/* Set the bit indicating that this page is no more an
 		ibuf tree page (level 2 page) */
@@ -4486,8 +4488,15 @@ ibuf_print(
   }
 
   const uint32_t size= ibuf.size;
+  mtr_t mtr;
+  mtr.start();
+  std::ignore=
+    buf_page_get_gen(page_id_t{IBUF_SPACE_ID, FSP_IBUF_TREE_ROOT_PAGE_NO},
+                     0, RW_S_LATCH, nullptr, BUF_GET, &mtr, nullptr);
   const uint32_t free_list_len= ibuf.free_list_len;
   const uint32_t seg_size= ibuf.seg_size;
+  mtr.commit();
+
   mysql_mutex_unlock(&ibuf_mutex);
 
   fprintf(file,
