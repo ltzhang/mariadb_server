@@ -53,6 +53,7 @@ Returns a new table, index, or space id. */
 void
 dict_hdr_get_new_id(
 /*================*/
+	trx_t*			trx,		/*!< in/out: transaction */
 	table_id_t*		table_id,	/*!< out: table id
 						(not assigned if NULL) */
 	index_id_t*		index_id,	/*!< out: index id
@@ -61,7 +62,7 @@ dict_hdr_get_new_id(
 						(not assigned if NULL) */
 {
 	ib_id_t		id;
-	mtr_t		mtr;
+	mtr_t		mtr{trx};
 
 	mtr.start();
 	buf_block_t* dict_hdr = dict_hdr_get(&mtr);
@@ -100,7 +101,7 @@ dict_hdr_get_new_id(
 /** Update dict_sys.row_id in the dictionary header file page. */
 void dict_hdr_flush_row_id(row_id_t id)
 {
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   mtr.start();
   buf_block_t* d= dict_hdr_get(&mtr);
   byte *row_id= DICT_HDR + DICT_HDR_ROW_ID + d->page.frame;
@@ -116,7 +117,7 @@ dberr_t dict_create()
 	ulint		root_page_no;
 
 	dberr_t err;
-	mtr_t mtr;
+	mtr_t mtr{nullptr};
 	mtr.start();
 	compile_time_assert(DICT_HDR_SPACE == 0);
 
@@ -213,7 +214,7 @@ dberr_t dict_boot()
 	dict_table_t*	table;
 	dict_index_t*	index;
 	mem_heap_t*	heap;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	static_assert(DICT_NUM_COLS__SYS_TABLES == 8, "compatibility");
 	static_assert(DICT_NUM_FIELDS__SYS_TABLES == 10, "compatibility");
@@ -426,13 +427,32 @@ dberr_t dict_boot()
 	err = ibuf_init_at_db_start();
 
 	if (err == DB_SUCCESS || srv_force_recovery >= SRV_FORCE_NO_DDL_UNDO) {
-		err = DB_SUCCESS;
 		/* Load definitions of other indexes on system tables */
-
-		dict_load_sys_table(dict_sys.sys_tables);
-		dict_load_sys_table(dict_sys.sys_columns);
-		dict_load_sys_table(dict_sys.sys_indexes);
-		dict_load_sys_table(dict_sys.sys_fields);
+		mem_heap_t *heap = mem_heap_create(1000);
+		err = dict_load_indexes(&mtr, dict_sys.sys_tables, false, heap,
+					DICT_ERR_IGNORE_NONE);
+		mem_heap_empty(heap);
+		if (err == DB_SUCCESS
+		    || srv_force_recovery >= SRV_FORCE_NO_DDL_UNDO) {
+			err = dict_load_indexes(&mtr, dict_sys.sys_columns,
+						false, heap,
+						DICT_ERR_IGNORE_NONE);
+			mem_heap_empty(heap);
+		}
+		if (err == DB_SUCCESS
+		    || srv_force_recovery >= SRV_FORCE_NO_DDL_UNDO) {
+			err = dict_load_indexes(&mtr, dict_sys.sys_indexes,
+						false, heap,
+						DICT_ERR_IGNORE_NONE);
+			mem_heap_empty(heap);
+		}
+		if (err == DB_SUCCESS
+		    || srv_force_recovery >= SRV_FORCE_NO_DDL_UNDO) {
+			err = dict_load_indexes(&mtr, dict_sys.sys_fields,
+						false, heap,
+						DICT_ERR_IGNORE_NONE);
+		}
+		mem_heap_free(heap);
 		dict_sys.unlock();
 		dict_sys.load_sys_tables();
 	} else {

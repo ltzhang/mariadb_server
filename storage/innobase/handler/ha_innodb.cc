@@ -1463,7 +1463,6 @@ static void innodb_drop_database(handlerton*, char *path)
     trx->commit();
 
   row_mysql_unlock_data_dictionary(trx);
-  trx->free();
   if (!stats_failed)
     stats.close();
 
@@ -1489,7 +1488,7 @@ static void innodb_drop_database(handlerton*, char *path)
     dict_index_copy_types(&tuple, sys_index, 1);
     std::vector<pfs_os_file_t> to_close;
     std::vector<uint32_t> space_ids;
-    mtr_t mtr;
+    mtr_t mtr{trx};
     mtr.start();
     pcur.btr_cur.page_cur.index = sys_index;
     err= btr_pcur_open_on_user_rec(&tuple, BTR_SEARCH_LEAF, &pcur, &mtr);
@@ -1550,6 +1549,7 @@ static void innodb_drop_database(handlerton*, char *path)
       log_write_up_to(mtr.commit_lsn(), true);
   }
 
+  trx->free();
   my_free(namebuf);
 }
 
@@ -1776,7 +1776,7 @@ const char *thd_innodb_tmpdir(THD *thd)
 /** Obtain the InnoDB transaction of a MariaDB thread handle.
 @param thd   current_thd
 @return InnoDB transaction */
-trx_t *thd_to_trx(THD *thd) noexcept
+trx_t *thd_to_trx(const THD *thd) noexcept
 {
   return static_cast<trx_t*>(thd_get_ha_data(thd, innodb_hton_ptr));
 }
@@ -1906,8 +1906,8 @@ We will attempt to drop the tables here. */
 static void drop_garbage_tables_after_restore()
 {
   btr_pcur_t pcur;
-  mtr_t mtr;
   trx_t *trx= trx_create();
+  mtr_t mtr{trx};
 
   ut_ad(!purge_sys.enabled());
   ut_d(purge_sys.stop_FTS());
@@ -8643,7 +8643,8 @@ ha_innobase::update_row(
 				if any INSERT actually used (and wrote to
 				PAGE_ROOT_AUTO_INC) a value bigger than our
 				autoinc. */
-				btr_write_autoinc(dict_table_get_first_index(
+				btr_write_autoinc(m_prebuilt->trx,
+						  dict_table_get_first_index(
 							  m_prebuilt->table),
 						  autoinc);
 			}
@@ -11916,7 +11917,7 @@ innobase_parse_hint_from_comment(
 				/* GEN_CLUST_INDEX should use
 				merge_threshold_table */
 				dict_index_set_merge_threshold(
-					index, merge_threshold_table);
+					*thd, index, merge_threshold_table);
 				continue;
 			}
 
@@ -11931,7 +11932,7 @@ innobase_parse_hint_from_comment(
 					index->name, key_info->name.str) == 0) {
 
 					dict_index_set_merge_threshold(
-						index,
+						*thd, index,
 						merge_threshold_index[i]);
 					is_found[i] = true;
 					break;
@@ -12907,7 +12908,8 @@ int create_table_info_t::create_table(bool create_fk)
 
 		/* Check that also referencing constraints are ok */
 		dict_names_t	fk_tables;
-		err = dict_load_foreigns(m_table_name, nullptr,
+		mtr_t mtr{m_trx};
+		err = dict_load_foreigns(mtr, m_table_name, nullptr,
 					 m_trx->id, true,
 					 ignore_err, fk_tables);
 		while (err == DB_SUCCESS && !fk_tables.empty()) {
@@ -13196,7 +13198,7 @@ bool create_table_info_t::row_size_is_acceptable(
 }
 
 void create_table_info_t::create_table_update_dict(dict_table_t *table,
-                                                   THD *thd,
+                                                   trx_t *trx,
                                                    const HA_CREATE_INFO &info,
                                                    const TABLE &t)
 {
@@ -13219,7 +13221,7 @@ void create_table_info_t::create_table_update_dict(dict_table_t *table,
 
   /* Load server stopword into FTS cache */
   if (table->flags2 & DICT_TF2_FTS &&
-      innobase_fts_load_stopword(table, nullptr, thd))
+      innobase_fts_load_stopword(table, nullptr, trx->mysql_thd))
     fts_optimize_add_table(table);
 
   if (const Field *ai = t.found_next_number_field)
@@ -13241,13 +13243,13 @@ void create_table_info_t::create_table_update_dict(dict_table_t *table,
       /* Persist the "last used" value, which typically is AUTO_INCREMENT - 1.
       In btr_create(), the value 0 was already written. */
       if (--autoinc)
-        btr_write_autoinc(dict_table_get_first_index(table), autoinc);
+        btr_write_autoinc(trx, dict_table_get_first_index(table), autoinc);
     }
 
     table->autoinc_mutex.wr_unlock();
   }
 
-  innobase_parse_hint_from_comment(thd, table, t.s);
+  innobase_parse_hint_from_comment(trx->mysql_thd, table, t.s);
 }
 
 /** Allocate a new trx. */
@@ -13256,6 +13258,7 @@ create_table_info_t::allocate_trx()
 {
 	m_trx = innobase_trx_allocate(m_thd);
 	m_trx->will_lock = true;
+	m_trx->mysql_thd= m_thd;
 }
 
 /** Create a new table to an InnoDB database.
@@ -13316,7 +13319,7 @@ ha_innobase::create(const char *name, TABLE *form, HA_CREATE_INFO *create_info,
       trx->commit(deleted);
       ut_ad(deleted.empty());
       info.table()->acquire();
-      info.create_table_update_dict(info.table(), info.thd(),
+      info.create_table_update_dict(info.table(), trx,
                                     *create_info, *form);
     }
 
@@ -13554,7 +13557,7 @@ int ha_innobase::delete_table(const char *name)
   {
     dict_sys.unlock();
     parent_trx->mod_tables.erase(table); /* CREATE...SELECT error handling */
-    btr_drop_temporary_table(*table);
+    btr_drop_temporary_table(parent_trx, *table);
     dict_sys.lock(SRW_LOCK_CALL);
     dict_sys.remove(table);
     dict_sys.unlock();
@@ -13910,7 +13913,7 @@ int ha_innobase::truncate()
   if (ib_table->is_temporary())
   {
     info.options|= HA_LEX_CREATE_TMP_TABLE;
-    btr_drop_temporary_table(*ib_table);
+    btr_drop_temporary_table(trx, *ib_table);
     m_prebuilt->table= nullptr;
     row_prebuilt_free(m_prebuilt);
     m_prebuilt= nullptr;
@@ -14041,7 +14044,7 @@ int ha_innobase::truncate()
       trx->commit(deleted);
       m_prebuilt->table->acquire();
       create_table_info_t::create_table_update_dict(m_prebuilt->table,
-                                                    m_user_thd, info, *table);
+                                                    trx, info, *table);
     }
     else
     {
@@ -14051,8 +14054,11 @@ int ha_innobase::truncate()
       m_prebuilt->table->def_trx_id= def_trx_id;
     }
     dict_names_t fk_tables;
-    dict_load_foreigns(m_prebuilt->table->name.m_name, nullptr, 1, true,
-                       DICT_ERR_IGNORE_FK_NOKEY, fk_tables);
+    {
+      mtr_t mtr{trx};
+      dict_load_foreigns(mtr, m_prebuilt->table->name.m_name, nullptr, 1, true,
+                         DICT_ERR_IGNORE_FK_NOKEY, fk_tables);
+    }
     for (const char *f : fk_tables)
       dict_sys.load_table({f, strlen(f)});
   }
@@ -14408,11 +14414,13 @@ func_exit:
 	if (dict_index_is_spatial(index)) {
 		/*Only min_key used in spatial index. */
 		n_rows = rtr_estimate_n_rows_in_range(
+			m_prebuilt->trx,
 			index, range_start, mode1);
 	} else {
 		btr_pos_t tuple1(range_start, mode1, pages->first_page);
 		btr_pos_t tuple2(range_end,   mode2, pages->last_page);
-		n_rows = btr_estimate_n_rows_in_range(index, &tuple1, &tuple2);
+		n_rows = btr_estimate_n_rows_in_range(m_prebuilt->trx,
+						      index, &tuple1, &tuple2);
 		pages->first_page= tuple1.page_id.raw();
 		pages->last_page=  tuple2.page_id.raw();
 	}
@@ -15182,7 +15190,7 @@ inline int ha_innobase::defragment_table()
 
     btr_pcur_t pcur;
 
-    mtr_t mtr;
+    mtr_t mtr{m_prebuilt->trx};
     mtr.start();
     if (dberr_t err= pcur.open_leaf(true, index, BTR_SEARCH_LEAF, &mtr))
     {
@@ -15394,7 +15402,7 @@ ha_innobase::check(
 			"dict_set_index_corrupted",
 			if (!index->is_primary()) {
 				m_prebuilt->index_usable = FALSE;
-				dict_set_corrupted(index,
+				dict_set_corrupted(m_prebuilt->trx, index,
 						   "dict_set_index_corrupted");
 			});
 
@@ -15468,7 +15476,8 @@ ha_innobase::check(
 				" index %s is corrupted.",
 				index->name());
 			is_ok = false;
-			dict_set_corrupted(index, "CHECK TABLE-check index");
+			dict_set_corrupted(m_prebuilt->trx, index,
+					   "CHECK TABLE-check index");
 		}
 
 
@@ -15483,7 +15492,8 @@ ha_innobase::check(
 				" entries, should be " ULINTPF ".",
 				index->name(), n_rows, n_rows_in_table);
 			is_ok = false;
-			dict_set_corrupted(index, "CHECK TABLE; Wrong count");
+			dict_set_corrupted(m_prebuilt->trx, index,
+					   "CHECK TABLE; Wrong count");
 		}
 	}
 
@@ -17690,7 +17700,7 @@ static
 void
 innodb_make_page_dirty(THD*, st_mysql_sys_var*, void*, const void* save)
 {
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 	uint		space_id = *static_cast<const uint*>(save);
 	srv_fil_make_page_dirty_debug= space_id;
 	mysql_mutex_unlock(&LOCK_global_system_variables);
@@ -18468,7 +18478,7 @@ now.
 @param[in]	save	immediate result from check function */
 static
 void
-innodb_merge_threshold_set_all_debug_update(THD*, st_mysql_sys_var*, void*,
+innodb_merge_threshold_set_all_debug_update(THD* thd, st_mysql_sys_var*, void*,
 					    const void* save)
 {
 	innodb_merge_threshold_set_all_debug
@@ -18661,7 +18671,7 @@ static void innodb_log_file_size_update(THD *thd, st_mysql_sys_var*,
           ut_ad(!log_sys.is_mmap());
           /* The server is almost idle. Write dummy FILE_CHECKPOINT records
           to ensure that the log resizing will complete. */
-          mtr_t mtr;
+          mtr_t mtr{nullptr};
           mtr.start();
           mtr.commit_files(log_sys.last_checkpoint_lsn);
         }

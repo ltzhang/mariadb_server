@@ -1474,8 +1474,8 @@ row_ins_check_foreign_constraint(
 	ulint		n_fields_cmp;
 	btr_pcur_t	pcur;
 	int		cmp;
-	mtr_t		mtr;
 	trx_t*		trx		= thr_get_trx(thr);
+	mtr_t		mtr{trx};
 	mem_heap_t*	heap		= NULL;
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets		= offsets_;
@@ -1699,7 +1699,7 @@ row_ins_check_foreign_constraint(
 							vers_history_row(rec,
 									 offsets);
 					} else if (check_index->
-						vers_history_row(rec,
+						vers_history_row(&mtr, rec,
 								 history_row)) {
 						break;
 					}
@@ -2026,9 +2026,9 @@ row_ins_dupl_error_with_rec(
 @retval DB_SUCCESS                on success
 @retval DB_FOREIGN_DUPLICATE_KEY  if a history row was inserted by trx */
 static dberr_t vers_row_same_trx(dict_index_t* index, const rec_t* rec,
-                                 const trx_t& trx)
+                                 trx_t *trx)
 {
-  mtr_t mtr;
+  mtr_t mtr{trx};
   dberr_t ret= DB_SUCCESS;
   dict_index_t *clust_index= dict_table_get_first_index(index->table);
   ut_ad(index != clust_index);
@@ -2053,7 +2053,7 @@ static dberr_t vers_row_same_trx(dict_index_t* index, const rec_t* rec,
                                             clust_index->n_uniq, &trx_id_len);
       ut_ad(trx_id_len == DATA_TRX_ID_LEN);
 
-      if (trx.id == trx_read_trx_id(trx_id))
+      if (trx->id == trx_read_trx_id(trx_id))
         ret= DB_FOREIGN_DUPLICATE_KEY;
     }
 
@@ -2183,7 +2183,7 @@ row_ins_scan_sec_index_for_duplicate(
 				if (!index->table->versioned()) {
 				} else if (dberr_t e =
 					   vers_row_same_trx(index, rec,
-							     *trx)) {
+							     trx)) {
 					err = e;
 					goto end_scan;
 				}
@@ -2514,8 +2514,8 @@ of a clustered index entry.
 @param[in]	big_rec	externally stored fields
 @param[in,out]	offsets	rec_get_offsets()
 @param[in,out]	heap	memory heap
-@param[in]	thd	client connection, or NULL
 @param[in]	index	clustered index
+@param[in]	trx	transaction
 @return	error code
 @retval	DB_SUCCESS
 @retval DB_OUT_OF_FILE_SPACE */
@@ -2527,16 +2527,16 @@ row_ins_index_entry_big_rec(
 	rec_offs*		offsets,
 	mem_heap_t**		heap,
 	dict_index_t*		index,
-	const void*		thd __attribute__((unused)))
+	trx_t*			trx)
 {
-	mtr_t		mtr;
+	mtr_t		mtr{trx};
 	btr_pcur_t	pcur;
 	rec_t*		rec;
 
 	pcur.btr_cur.page_cur.index = index;
 	ut_ad(index->is_primary());
 
-	DEBUG_SYNC_C_IF_THD(thd, "before_row_ins_extern_latch");
+	DEBUG_SYNC_C_IF_THD(trx->mysql_thd, "before_row_ins_extern_latch");
 
 	mtr.start();
 	if (index->table->is_temporary()) {
@@ -2555,10 +2555,10 @@ row_ins_index_entry_big_rec(
 	offsets = rec_get_offsets(rec, index, offsets, index->n_core_fields,
 				  ULINT_UNDEFINED, heap);
 
-	DEBUG_SYNC_C_IF_THD(thd, "before_row_ins_extern");
+	DEBUG_SYNC_C_IF_THD(trx->mysql_thd, "before_row_ins_extern");
 	error = btr_store_big_rec_extern_fields(
 		&pcur, offsets, big_rec, &mtr, BTR_STORE_INSERT);
-	DEBUG_SYNC_C_IF_THD(thd, "after_row_ins_extern");
+	DEBUG_SYNC_C_IF_THD(trx->mysql_thd, "after_row_ins_extern");
 
 	mtr.commit();
 
@@ -2662,13 +2662,13 @@ row_ins_clust_index_entry_low(
 	btr_pcur_t	pcur;
 	dberr_t		err		= DB_SUCCESS;
 	big_rec_t*	big_rec		= NULL;
-	mtr_t		mtr;
 	uint64_t	auto_inc	= 0;
 	mem_heap_t*	offsets_heap	= NULL;
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets         = offsets_;
 	rec_offs_init(offsets_);
 	trx_t*		trx	= thr_get_trx(thr);
+	mtr_t		mtr{trx};
 	buf_block_t*	block;
 
 	DBUG_ENTER("row_ins_clust_index_entry_low");
@@ -2994,7 +2994,7 @@ do_insert:
 				log_write_up_to(mtr.commit_lsn(), true););
 			err = row_ins_index_entry_big_rec(
 				entry, big_rec, offsets, &offsets_heap, index,
-				trx->mysql_thd);
+				trx);
 			dtuple_convert_back_big_rec(index, entry, big_rec);
 		}
 	}
@@ -3053,7 +3053,8 @@ row_ins_sec_index_entry_low(
 	btr_latch_mode	search_mode	= mode;
 	dberr_t		err;
 	ulint		n_unique;
-	mtr_t		mtr;
+	trx_t*const	trx{thr_get_trx(thr)};
+	mtr_t		mtr{trx};
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets         = offsets_;
 	rec_offs_init(offsets_);
@@ -3065,7 +3066,7 @@ row_ins_sec_index_entry_low(
 	cursor.thr = thr;
 	cursor.rtr_info = NULL;
 	cursor.page_cur.index = index;
-	ut_ad(thr_get_trx(thr)->id != 0);
+	ut_ad(trx->id != 0);
 
 	mtr.start();
 
@@ -3114,7 +3115,7 @@ row_ins_sec_index_entry_low(
 		if (!index->table->is_temporary()) {
 			search_mode = btr_latch_mode(
 				search_mode
-				| (thr_get_trx(thr)->check_unique_secondary
+				| (trx->check_unique_secondary
 				   ? BTR_INSERT
 				   : BTR_INSERT | BTR_IGNORE_SEC_UNIQUE));
 		}
@@ -3125,7 +3126,7 @@ row_ins_sec_index_entry_low(
 
 	if (err != DB_SUCCESS) {
 		if (err == DB_DECRYPTION_FAILED) {
-			innodb_decryption_failed(thr_get_trx(thr)->mysql_thd,
+			innodb_decryption_failed(trx->mysql_thd,
 						 index->table);
 		}
 		goto func_exit;
@@ -3168,8 +3169,7 @@ row_ins_sec_index_entry_low(
 			break;
 		case DB_DUPLICATE_KEY:
 			if (!index->is_committed()) {
-				ut_ad(!thr_get_trx(thr)
-				      ->dict_operation_lock_mode);
+				ut_ad(!trx->dict_operation_lock_mode);
 				index->type |= DICT_CORRUPT;
 				/* Do not return any error to the
 				caller. The duplicate will be reported
@@ -4004,7 +4004,7 @@ const rec_t *row_search_get_max_rec(dict_index_t *index, mtr_t *mtr) noexcept
 uint64_t row_search_max_autoinc(dict_index_t *index) noexcept
 {
   uint64_t value= 0;
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   mtr.start();
   if (const rec_t *rec= row_search_get_max_rec(index, &mtr))
     value= row_read_autoinc(*index, rec);

@@ -1824,13 +1824,13 @@ row_upd_sec_index_entry(
 	upd_node_t*	node,	/*!< in: row update node */
 	que_thr_t*	thr)	/*!< in: query thread */
 {
-	mtr_t			mtr;
 	btr_pcur_t		pcur;
 	mem_heap_t*		heap;
 	dtuple_t*		entry;
 	dict_index_t*		index;
 	dberr_t			err	= DB_SUCCESS;
 	trx_t*			trx	= thr_get_trx(thr);
+	mtr_t			mtr{thr_get_trx(thr)};
 	btr_latch_mode		mode;
 	ulint			flags;
 	enum row_search_result	search_result;
@@ -1922,7 +1922,7 @@ not_found:
 #ifdef UNIV_DEBUG
 		mtr_commit(&mtr);
 		mtr_start(&mtr);
-		ut_ad(btr_validate_index(index, 0) == DB_SUCCESS);
+		ut_ad(btr_validate_index(index, trx) == DB_SUCCESS);
 		ut_ad(0);
 #endif /* UNIV_DEBUG */
 		break;
@@ -2562,13 +2562,13 @@ row_upd_clust_step(
 	dict_index_t*	index;
 	btr_pcur_t*	pcur;
 	dberr_t		err;
-	mtr_t		mtr;
 	rec_t*		rec;
 	mem_heap_t*	heap	= NULL;
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets;
 	ulint		flags;
 	trx_t*		trx = thr_get_trx(thr);
+	mtr_t		mtr{trx};
 
 	rec_offs_init(offsets_);
 

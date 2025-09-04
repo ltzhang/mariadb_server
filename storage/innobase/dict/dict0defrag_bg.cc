@@ -308,7 +308,7 @@ dict_stats_save_defrag_stats(
     return dict_stats_report_error(index->table, true);
 
   const time_t now= time(nullptr);
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   uint32_t n_leaf_pages;
   mtr.start();
   mtr_sx_lock_index(index, &mtr);

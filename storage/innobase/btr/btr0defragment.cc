@@ -712,7 +712,7 @@ static void btr_defragment_chunk(void*)
 	set_current_thd(thd);
 
 	btr_defragment_item_t* item = nullptr;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	mysql_mutex_lock(&btr_defragment_mutex);
 

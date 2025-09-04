@@ -181,7 +181,6 @@ must hold a latch on the index page of the clustered index record.
                  or if the purge could have removed the version though
                  it has not yet done so
 @param mtr       mini-transaction
-@param trx       transaction connected to current_thd
 @param v_status  TRX_UNDO_PREV_IN_PURGE, ...
 @param v_heap    memory heap used to create vrow dtuple if it is not yet
                  created. This heap diffs from "heap" above in that it could be
@@ -193,7 +192,7 @@ or if it was an insert or the undo record refers to the table before rebuild
 @retval DB_MISSING_HISTORY if the history is missing */
 dberr_t trx_undo_prev_version_build(const rec_t *rec, dict_index_t *index,
                                     rec_offs *offsets, mem_heap_t *heap,
-                                    rec_t **old_vers, mtr_t *mtr, trx_t *trx,
+                                    rec_t **old_vers, mtr_t *mtr,
                                     ulint v_status,
                                     mem_heap_t *v_heap, dtuple_t **vrow);
 

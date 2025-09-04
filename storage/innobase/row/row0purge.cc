@@ -129,7 +129,7 @@ retry:
 			}
 		}
 	}
-	mtr_t mtr;
+	mtr_t mtr{node->trx};
 	mtr.start();
 	index->set_modified(mtr);
 	log_free_check();
@@ -371,7 +371,7 @@ row_purge_vc_matches_cluster(
 
 		trx_undo_prev_version_build(
 			version, clust_index, clust_offsets,
-			heap, &prev_version, mtr, node.trx,
+			heap, &prev_version, mtr,
 			TRX_UNDO_PREV_IN_PURGE | TRX_UNDO_GET_OLD_V_VALUE,
 			nullptr, vrow);
 
@@ -625,7 +625,7 @@ unsafe_to_purge:
 
 		cur_vrow = row_vers_build_cur_vrow(
 			rec, clust_index, &clust_offsets,
-			index, trx_id, roll_ptr, heap, v_heap, mtr, node.trx);
+			index, trx_id, roll_ptr, heap, v_heap, mtr);
 	}
 
 	version = rec;
@@ -637,7 +637,7 @@ unsafe_to_purge:
 
 		trx_undo_prev_version_build(version,
 					    clust_index, clust_offsets,
-					    heap, &prev_version, mtr, node.trx,
+					    heap, &prev_version, mtr,
 					    TRX_UNDO_CHECK_PURGE_PAGES,
 					    nullptr,
 					    dict_index_has_virtual(index)
@@ -742,6 +742,7 @@ page latch.
 bool row_purge_poss_sec(purge_node_t *node, dict_index_t *index,
                         const dtuple_t *entry, mtr_t *mtr)
 {
+  ut_ad(mtr->trx == node->trx);
   ut_ad(!index->is_clust());
   const auto savepoint= mtr->get_savepoint();
   bool can_delete= !row_purge_reposition_pcur(BTR_SEARCH_LEAF, node, mtr);
@@ -790,7 +791,7 @@ static bool row_purge_remove_sec_if_poss_tree(purge_node_t *node,
 	btr_pcur_t		pcur;
 	bool			success	= true;
 	dberr_t			err;
-	mtr_t			mtr;
+	mtr_t			mtr{node->trx};
 
 	log_free_check();
 #ifdef ENABLED_DEBUG_SYNC
@@ -908,7 +909,7 @@ static trx_id_t row_purge_remove_sec_if_poss_leaf(purge_node_t *node,
                                                   dict_index_t *index,
                                                   const dtuple_t *entry)
 {
-	mtr_t			mtr;
+	mtr_t			mtr{node->trx};
 	btr_pcur_t		pcur;
 	trx_id_t		page_max_trx_id = 0;
 
@@ -948,7 +949,7 @@ found:
 						  ->not_redundant())) {
 				row_purge_del_mark_error(pcur.btr_cur, *entry);
 				mtr.commit();
-				dict_set_corrupted(index, "purge");
+				dict_set_corrupted(node->trx, index, "purge");
 				goto cleanup;
 			}
 
@@ -1125,7 +1126,7 @@ row_purge_upd_exist_or_extern(
 	mem_heap_free(heap);
 
 skip_secondaries:
-	mtr_t		mtr;
+	mtr_t mtr{node->trx};
 	dict_index_t*	index = dict_table_get_first_index(node->table);
 	/* Free possible externally stored fields */
 	for (ulint i = 0; i < upd_get_n_fields(node->update); i++) {

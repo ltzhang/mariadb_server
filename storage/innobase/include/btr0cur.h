@@ -100,11 +100,12 @@ btr_cur_position(
 
 /** Load the instant ALTER TABLE metadata from the clustered index
 when loading a table definition.
+@param[in,out]	mtr	mini-transaction
 @param[in,out]	table	table definition from the data dictionary
 @return	error code
 @retval	DB_SUCCESS	if no error occurred */
 dberr_t
-btr_cur_instant_init(dict_table_t* table)
+btr_cur_instant_init(mtr_t *mtr, dict_table_t* table)
 	ATTRIBUTE_COLD __attribute__((nonnull, warn_unused_result));
 
 /** Initialize the n_core_null_bytes on first access to a clustered
@@ -460,11 +461,12 @@ number of rows, otherwise count the estimated(see
 btr_estimate_n_rows_in_range_on_level() for details) number if rows, and
 fetch the right page. If leaves are reached, unlatch non-leaf pages except
 the right leaf parent. After the right leaf page is fetched, commit mtr.
-@param[in]  index index
-@param[in]  range_start range start
-@param[in]  range_end   range end
+@param trx transaction
+@param index B-tree
+@param range_start first key
+@param range_end   last key
 @return estimated number of rows; */
-ha_rows btr_estimate_n_rows_in_range(dict_index_t *index,
+ha_rows btr_estimate_n_rows_in_range(trx_t *trx, dict_index_t *index,
                                      btr_pos_t *range_start,
                                      btr_pos_t *range_end);
 
@@ -758,11 +760,10 @@ struct btr_cur_t {
   all sibling pages on the way.
   @param tuple      key to search for, with correct n_fields_cmp
   @param mode       search mode; PAGE_CUR_LE for unique prefix or for inserting
-  @param trx        transaction associated with current_thd
   @param mtr        mini-transaction
   @return error code */
   dberr_t pessimistic_search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
-                                  trx_t *trx, mtr_t *mtr);
+                                  mtr_t *mtr);
 
   /** Open the cursor at a random leaf page record.
   @param offsets   temporary memory for rec_get_offsets()

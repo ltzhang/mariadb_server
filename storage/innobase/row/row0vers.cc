@@ -69,7 +69,6 @@ row_vers_non_virtual_fields_equal(
 
 /** Determine if an active transaction has inserted or modified a secondary
 index record.
-@param[in,out]	caller_trx	trx of current thread
 @param[in]	clust_rec	clustered index record
 @param[in]	clust_index	clustered index
 @param[in]	rec		secondary index record
@@ -82,7 +81,6 @@ acquiring trx->mutex, and trx->release_reference() must be invoked
 UNIV_INLINE
 trx_t*
 row_vers_impl_x_locked_low(
-	trx_t*		caller_trx,
 	const rec_t*	clust_rec,
 	dict_index_t*	clust_index,
 	const rec_t*	rec,
@@ -123,7 +121,7 @@ row_vers_impl_x_locked_low(
 					ULINT_UNDEFINED, &heap);
 
 	trx_id = row_get_rec_trx_id(clust_rec, clust_index, clust_offsets);
-	if (trx_id <= caller_trx->max_inactive_id) {
+	if (trx_id <= mtr->trx->max_inactive_id) {
 		/* The transaction history was already purged. */
 		mem_heap_free(heap);
 		DBUG_RETURN(0);
@@ -133,11 +131,11 @@ row_vers_impl_x_locked_low(
 
 	trx_t*	trx;
 
-	if (trx_id == caller_trx->id) {
-		trx = caller_trx;
+	if (trx_id == mtr->trx->id) {
+		trx = mtr->trx;
 		trx->reference();
 	} else {
-		trx = trx_sys.find(caller_trx, trx_id);
+		trx = trx_sys.find(mtr->trx, trx_id);
 		if (trx == 0) {
 			/* The transaction that modified or inserted
 			clust_rec is no longer active, or it is
@@ -194,8 +192,7 @@ row_vers_impl_x_locked_low(
 
 		trx_undo_prev_version_build(
 			version, clust_index, clust_offsets,
-			heap, &prev_version, mtr,
-			caller_trx, 0, NULL,
+			heap, &prev_version, mtr, 0, NULL,
 			dict_index_has_virtual(index) ? &vrow : NULL);
 		ut_d(bool owns_trx_mutex = trx->mutex_is_owner());
 		ut_d(if (!owns_trx_mutex)
@@ -398,7 +395,7 @@ row_vers_impl_x_locked(
 	dict_index_t*	index,
 	const rec_offs*	offsets)
 {
-	mtr_t		mtr;
+	mtr_t		mtr{caller_trx};
 	trx_t*		trx;
 	const rec_t*	clust_rec;
 	dict_index_t*	clust_index;
@@ -438,7 +435,7 @@ row_vers_impl_x_locked(
 		trx = 0;
 	} else {
 		trx = row_vers_impl_x_locked_low(
-				caller_trx, clust_rec, clust_index, rec, index,
+				clust_rec, clust_index, rec, index,
 				offsets, &mtr);
 
 		ut_ad(trx == 0 || trx->is_referenced());
@@ -506,8 +503,7 @@ row_vers_build_clust_v_col(
 @param[in]	roll_ptr	the rollback pointer for the purging record
 @param[in,out]	v_heap		heap used to build vrow
 @param[out]	v_row		dtuple holding the virtual rows
-@param[in,out]	mtr		mtr holding the latch on rec
-@param[in,out]	trx		transaction associated with current_thd */
+@param[in,out]	mtr		mtr holding the latch on rec */
 static
 void
 row_vers_build_cur_vrow_low(
@@ -519,8 +515,7 @@ row_vers_build_cur_vrow_low(
 	roll_ptr_t		roll_ptr,
 	mem_heap_t*		v_heap,
 	dtuple_t**		vrow,
-	mtr_t*			mtr,
-	trx_t*			trx)
+	mtr_t*			mtr)
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
@@ -559,7 +554,7 @@ row_vers_build_cur_vrow_low(
 
 		trx_undo_prev_version_build(
 			version, clust_index, clust_offsets,
-			heap, &prev_version, mtr, trx, status, nullptr, vrow);
+			heap, &prev_version, mtr, status, nullptr, vrow);
 
 		if (heap2) {
 			mem_heap_free(heap2);
@@ -623,7 +618,6 @@ row_vers_build_cur_vrow_low(
 @param[in,out]	heap		heap memory
 @param[in,out]	v_heap		heap memory to keep virtual column tuple
 @param[in,out]	mtr		mini-transaction
-@param[in,out]	trx		transaction associated with current_thd
 @return dtuple contains virtual column data */
 dtuple_t*
 row_vers_build_cur_vrow(
@@ -635,8 +629,7 @@ row_vers_build_cur_vrow(
 	roll_ptr_t		roll_ptr,
 	mem_heap_t*		heap,
 	mem_heap_t*		v_heap,
-	mtr_t*			mtr,
-	trx_t*			trx)
+	mtr_t*			mtr)
 {
 	dtuple_t* cur_vrow = NULL;
 
@@ -667,8 +660,7 @@ row_vers_build_cur_vrow(
 		/* Try to fetch virtual column data from undo log */
 		row_vers_build_cur_vrow_low(
 			rec, clust_index, *clust_offsets,
-			index, trx_id, roll_ptr, v_heap, &cur_vrow, mtr,
-                        trx);
+			index, trx_id, roll_ptr, v_heap, &cur_vrow, mtr);
 	}
 
 	*clust_offsets = rec_get_offsets(rec, clust_index, NULL,
@@ -736,8 +728,6 @@ row_vers_build_for_consistent_read(
 	mem_heap_t*	heap		= NULL;
 	byte*		buf;
 	dberr_t		err;
-	THD* const	thd{current_thd};
-	trx_t* const	trx{thd ? thd_to_trx(thd) : nullptr};
 
 	ut_ad(index->is_primary());
 	ut_ad(mtr->memo_contains_page_flagged(rec, MTR_MEMO_PAGE_X_FIX
@@ -767,7 +757,7 @@ row_vers_build_for_consistent_read(
 
 		err = trx_undo_prev_version_build(
 			version, index, *offsets, heap,
-			&prev_version, mtr, trx, 0, NULL, vrow);
+			&prev_version, mtr, 0, NULL, vrow);
 
 		if (prev_heap != NULL) {
 			mem_heap_free(prev_heap);
@@ -830,7 +820,6 @@ which should be seen by a semi-consistent read. */
 void
 row_vers_build_for_semi_consistent_read(
 /*====================================*/
-	trx_t*		caller_trx,/*!<in/out: trx of current thread */
 	const rec_t*	rec,	/*!< in: record in a clustered index; the
 				caller must have a latch on the page; this
 				latch locks the top of the stack of versions
@@ -875,7 +864,7 @@ row_vers_build_for_semi_consistent_read(
 			rec_trx_id = version_trx_id;
 		}
 
-		if (!trx_sys.is_registered(caller_trx, version_trx_id)) {
+		if (!trx_sys.is_registered(mtr->trx, version_trx_id)) {
 committed_version_trx:
 			/* We found a version that belongs to a
 			committed transaction: return it. */
@@ -929,8 +918,7 @@ committed_version_trx:
 		heap = mem_heap_create(1024);
 
 		if (trx_undo_prev_version_build(version, index, *offsets, heap,
-						&prev_version, mtr,
-						caller_trx, 0,
+						&prev_version, mtr, 0,
 						in_heap, vrow) != DB_SUCCESS) {
 			mem_heap_free(heap);
 			heap = heap2;

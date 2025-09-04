@@ -299,7 +299,7 @@ struct fil_iterator_t {
 class RecIterator {
 public:
 	/** Default constructor */
-	RecIterator() UNIV_NOTHROW
+	RecIterator() noexcept : m_mtr{nullptr}
 	{
 		memset(&m_cur, 0x0, sizeof(m_cur));
 		/* Make page_cur_delete_rec() happy. */
@@ -395,7 +395,7 @@ public:
 		trx_t*		trx,
 		dict_index_t*	index) UNIV_NOTHROW
 		:
-		m_trx(trx),
+		m_mtr{trx},
 		m_index(index),
 		m_n_rows(0)
 	{
@@ -443,7 +443,6 @@ protected:
 	IndexPurge &operator=(const IndexPurge&);
 
 private:
-	trx_t*			m_trx;		/*!< User transaction */
 	mtr_t			m_mtr;		/*!< Mini-transaction */
 	btr_pcur_t		m_pcur;		/*!< Persistent cursor */
 	dict_index_t*		m_index;	/*!< Index to be processed */
@@ -1617,7 +1616,7 @@ dberr_t IndexPurge::next() noexcept
 
 	if (!btr_pcur_is_after_last_on_page(&m_pcur)) {
 		return(DB_SUCCESS);
-	} else if (trx_is_interrupted(m_trx)) {
+	} else if (trx_is_interrupted(m_mtr.trx)) {
 		/* Check after every page because the check
 		is expensive. */
 		return(DB_INTERRUPTED);
@@ -2354,7 +2353,7 @@ row_import_adjust_root_pages_of_secondary_indexes(
 			/* Update the Btree segment headers for index node and
 			leaf nodes in the root page. Set the new space id. */
 
-			err = btr_root_adjust_on_import(index);
+			err = btr_root_adjust_on_import(trx, index);
 		} else {
 			ib::warn() << "Skip adjustment of root pages for"
 				" index " << index->name << ".";
@@ -2436,7 +2435,7 @@ row_import_set_sys_max_row_id(
 	const dict_table_t*	table)		/*!< in: table to import */
 {
 	const rec_t*		rec;
-	mtr_t			mtr;
+	mtr_t			mtr{prebuilt->trx};
 	btr_pcur_t		pcur;
 	row_id_t		row_id	= 0;
 	dict_index_t*		index;
@@ -4527,7 +4526,8 @@ static void row_import_autoinc(dict_table_t *table, row_prebuilt_t *prebuilt,
 
   if (autoinc)
   {
-    btr_write_autoinc(dict_table_get_first_index(table), autoinc - 1);
+    btr_write_autoinc(prebuilt->trx,
+                      dict_table_get_first_index(table), autoinc - 1);
   autoinc_set:
     table->autoinc= autoinc;
     sql_print_information("InnoDB: %`.*s.%`s autoinc value set to " UINT64PF,
@@ -4596,7 +4596,7 @@ dberr_t innodb_insert_hidden_fts_col(dict_table_t* table,
   }
   pars_info_t *info= pars_info_create();
   pars_info_add_ull_literal(info, "id", table->id);
-  dict_hdr_get_new_id(NULL, &fts_idx->id, NULL);
+  dict_hdr_get_new_id(trx, NULL, &fts_idx->id, NULL);
   pars_info_add_ull_literal(info, "idx_id", fts_idx->id);
   pars_info_add_int4_literal(info, "pos", fts_pos);
   pars_info_add_int4_literal(info, "space", fts_idx->table->space_id);
@@ -4668,9 +4668,9 @@ row_import_for_mysql(
 
 	/* TODO: Do not write any undo log for the IMPORT cleanup. */
 	{
-		mtr_t mtr;
+		mtr_t mtr{trx};
 		mtr.start();
-		trx_undo_assign(trx, &err, &mtr);
+		trx_undo_assign(&mtr, &err);
 		mtr.commit();
 	}
 
@@ -4876,7 +4876,7 @@ import_error:
 	/* Update the Btree segment headers for index node and
 	leaf nodes in the root page. Set the new space id. */
 
-	err = btr_root_adjust_on_import(index);
+	err = btr_root_adjust_on_import(trx, index);
 
 	DBUG_EXECUTE_IF("ib_import_cluster_root_adjust_failure",
 			err = DB_CORRUPTION;);

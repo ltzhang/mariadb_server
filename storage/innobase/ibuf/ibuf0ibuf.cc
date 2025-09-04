@@ -392,7 +392,7 @@ ibuf_init_at_db_start(void)
 	page_t*		root;
 
 	ut_ad(!ibuf.index);
-	mtr_t mtr;
+	mtr_t mtr{nullptr};
 	mtr.start();
 	compile_time_assert(IBUF_SPACE_ID == TRX_SYS_SPACE);
 	compile_time_assert(IBUF_SPACE_ID == 0);
@@ -727,7 +727,7 @@ ibuf_set_free_bits_func(
   if (!page_is_leaf(block->page.frame))
     return;
 
-  mtr_t	mtr;
+  mtr_t	mtr{nullptr};
   mtr.start();
   const page_id_t id(block->page.id());
   const fil_space_t *space= mtr.set_named_space_id(id.space());
@@ -909,7 +909,7 @@ ibuf_page_low(
 	mtr_t*			mtr)
 {
 	ibool	ret;
-	mtr_t	local_mtr;
+	mtr_t	local_mtr{nullptr};
 
 	ut_ad(!recv_no_ibuf_operations);
 	ut_ad(x_latch || mtr == NULL);
@@ -1771,7 +1771,7 @@ ibuf_data_too_much_free(void)
 @retval false if no space left */
 static bool ibuf_add_free_page()
 {
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 	page_t*		header_page;
 	buf_block_t*	block;
 
@@ -1859,7 +1859,7 @@ shutdown
 @retval DB_SUCCESS if page is freed */
 static dberr_t ibuf_remove_free_page(bool all = false)
 {
-	mtr_t	mtr;
+	mtr_t	mtr{nullptr};
 	page_t*	header_page;
 	dberr_t err = DB_SUCCESS;
 
@@ -2284,7 +2284,7 @@ static void ibuf_delete_recs(const page_id_t page_id)
   dfield_set_data(&dfield[2], page_no, 4);
   dtuple_set_types_binary(&tuple, IBUF_REC_FIELD_METADATA);
 
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
 loop:
   btr_pcur_t pcur;
   pcur.btr_cur.page_cur.index= ibuf.index;
@@ -2348,7 +2348,7 @@ tablespace_deleted:
 		const ulint zip_size = s->zip_size(), size = s->size;
 		s->x_lock();
 		s->release();
-		mtr_t mtr;
+		mtr_t mtr{nullptr};
 
 		if (UNIV_LIKELY(page_nos[i] < size)) {
 			mtr.start();
@@ -2412,7 +2412,7 @@ will be merged from ibuf trees to the pages read
 ATTRIBUTE_COLD ulint ibuf_contract()
 {
 	if (UNIV_UNLIKELY(!ibuf.index)) return 0;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 	btr_cur_t	cur;
 	ulint		sum_sizes;
 	uint32_t	page_nos[IBUF_MAX_N_PAGES_MERGED];
@@ -2462,7 +2462,7 @@ ibuf_merge_space(
 	ulint		space)	/*!< in: tablespace id to merge */
 {
 	if (UNIV_UNLIKELY(!ibuf.index)) return 0;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 	btr_pcur_t	pcur;
 
 	dfield_t dfield[IBUF_REC_FIELD_METADATA];
@@ -2908,7 +2908,7 @@ ibuf_update_max_tablespace_id(void)
 	const byte*	field;
 	ulint		len;
 	btr_pcur_t	pcur;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	ut_ad(!ibuf.index->table->not_redundant());
 
@@ -3132,8 +3132,8 @@ ibuf_insert_low(
 	buf_block_t*	block		= NULL;
 	page_t*		root;
 	dberr_t		err;
-	mtr_t		mtr;
-	mtr_t		bitmap_mtr;
+	mtr_t		mtr{nullptr};
+	mtr_t		bitmap_mtr{nullptr};
 
 	ut_a(!dict_index_is_clust(index));
 	ut_ad(!dict_index_is_spatial(index));
@@ -4024,7 +4024,7 @@ bool ibuf_page_exists(const page_id_t id, ulint zip_size)
 		return false;
 	}
 
-	mtr_t mtr;
+	mtr_t mtr{nullptr};
 	bool bitmap_bits = false;
 
 	ibuf_mtr_start(&mtr);
@@ -4098,7 +4098,7 @@ dberr_t ibuf_merge_or_delete_for_page(buf_block_t *block,
 	ulint		volume			= 0;
 #endif /* UNIV_IBUF_DEBUG */
 	dberr_t		err = DB_SUCCESS;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	fil_space_t* space = fil_space_t::get(page_id.space());
 
@@ -4129,10 +4129,14 @@ dberr_t ibuf_merge_or_delete_for_page(buf_block_t *block,
 			return DB_SUCCESS;
 		}
 
-		if (!block
-		    || DB_SUCCESS
-		    == fseg_page_is_allocated(space, page_id.page_no())) {
-			ibuf_mtr_start(&mtr);
+		if (block) {
+			mtr.start();
+			err = fseg_page_is_allocated(&mtr, space,
+						     page_id.page_no());
+			mtr.commit();
+		}
+
+		if (err == DB_SUCCESS) {
 			mtr.set_named_space(space);
 			ibuf_reset_bitmap(block, page_id, zip_size, &mtr);
 			ibuf_mtr_commit(&mtr);
@@ -4143,6 +4147,8 @@ dberr_t ibuf_merge_or_delete_for_page(buf_block_t *block,
 			}
 			goto done;
 		}
+
+		err = DB_SUCCESS;
 	}
 
 	if (!block) {
@@ -4366,7 +4372,7 @@ void ibuf_delete_for_discarded_space(uint32_t space)
 
 	btr_pcur_t	pcur;
 	const rec_t*	ibuf_rec;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	/* Counts for discarded operations. */
 	ulint		dops[IBUF_OP_COUNT];
@@ -4456,7 +4462,7 @@ bool
 ibuf_is_empty(void)
 /*===============*/
 {
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	ibuf_mtr_start(&mtr);
 
@@ -4520,7 +4526,7 @@ dberr_t ibuf_check_bitmap_on_import(const trx_t* trx, fil_space_t* space)
 		return(DB_TABLE_NOT_FOUND);
 	}
 
-	mtr_t mtr;
+	mtr_t mtr{nullptr};
 
 	/* The two bitmap pages (allocation bitmap and ibuf bitmap) repeat
 	every page_size pages. For example if page_size is 16 KiB, then the

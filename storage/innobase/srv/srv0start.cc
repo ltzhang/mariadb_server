@@ -414,7 +414,7 @@ static dberr_t srv_undo_delete_old_tablespaces()
 /** Recreate the undo log tablespaces */
 ATTRIBUTE_COLD static dberr_t srv_undo_tablespaces_reinit()
 {
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   dberr_t err;
   buf_block_t *first_rseg_hdr;
   uint32_t latest_space_id;
@@ -607,7 +607,7 @@ static dberr_t srv_undo_tablespaces_reinitialize()
 static uint32_t trx_rseg_get_n_undo_tablespaces()
 {
   std::set<uint32_t> space_ids;
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   mtr.start();
 
   if (const buf_block_t *sys_header= trx_sysf_get(&mtr, false))
@@ -954,7 +954,7 @@ srv_open_tmp_tablespace(bool create_new_db)
 		ib::error() << "Unable to create the shared innodb_temporary";
 	} else if (fil_system.temp_space->open(true)) {
 		/* Initialize the header page */
-		mtr_t mtr;
+		mtr_t mtr{nullptr};
 		mtr.start();
 		mtr.set_log_mode(MTR_LOG_NO_REDO);
 		err = fsp_header_init(fil_system.temp_space,
@@ -1164,7 +1164,7 @@ inline lsn_t log_t::init_lsn() noexcept
 dberr_t srv_start(bool create_new_db)
 {
 	dberr_t		err		= DB_SUCCESS;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 
 	ut_ad(srv_operation <= SRV_OPERATION_RESTORE_EXPORT
 	      || srv_operation == SRV_OPERATION_RESTORE
@@ -1386,7 +1386,6 @@ dberr_t srv_start(bool create_new_db)
 
 
 	if (err == DB_SUCCESS) {
-		mtr_t mtr;
 		mtr.start();
 		err= srv_undo_tablespaces_init(create_new_db, &mtr);
 		mtr.commit();

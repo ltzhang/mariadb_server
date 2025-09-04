@@ -246,7 +246,7 @@ row_undo_mod_clust(
 	que_thr_t*	thr)	/*!< in: query thread */
 {
 	btr_pcur_t*	pcur;
-	mtr_t		mtr;
+	mtr_t		mtr{node->trx};
 	dberr_t		err;
 	dict_index_t*	index;
 
@@ -483,8 +483,7 @@ corresponds to a secondary index entry.
 @return whether an accessible non-dete-marked version of rec
 corresponds to ientry */
 static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
-                                       const dtuple_t *ientry, mtr_t *mtr,
-                                       trx_t *trx)
+                                       const dtuple_t *ientry, mtr_t *mtr)
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
@@ -516,7 +515,7 @@ static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
 
 		cur_vrow = row_vers_build_cur_vrow(
 			rec, clust_index, &clust_offsets,
-			index, 0, 0, heap, v_heap, mtr, trx);
+			index, 0, 0, heap, v_heap, mtr);
 	}
 
 	version = rec;
@@ -528,7 +527,7 @@ static bool row_undo_mod_sec_is_unsafe(const rec_t *rec, dict_index_t *index,
 
 		trx_undo_prev_version_build(version,
 					    clust_index, clust_offsets,
-					    heap, &prev_version, mtr, trx,
+					    heap, &prev_version, mtr,
 					    TRX_UNDO_CHECK_PURGEABILITY,
 					    nullptr,
 					    dict_index_has_virtual(index)
@@ -629,7 +628,7 @@ row_undo_mod_del_mark_or_remove_sec_low(
 	btr_pcur_t		pcur;
 	btr_cur_t*		btr_cur;
 	dberr_t			err	= DB_SUCCESS;
-	mtr_t			mtr;
+	mtr_t			mtr{thr->graph->trx};
 	const bool		modify_leaf = mode == BTR_MODIFY_LEAF;
 
 	row_mtr_start(&mtr, index, !modify_leaf);
@@ -703,8 +702,7 @@ found:
 	clustered index entry, because there is no MVCC or purge. */
 	if (node->table->is_temporary()
 	    || row_undo_mod_sec_is_unsafe(
-		       btr_pcur_get_rec(&node->pcur), index, entry, &mtr,
-		       thr->graph->trx)) {
+		       btr_pcur_get_rec(&node->pcur), index, entry, &mtr)) {
 		btr_rec_set_deleted<true>(btr_cur_get_block(btr_cur),
 					  btr_cur_get_rec(btr_cur), &mtr);
 	} else {
@@ -806,8 +804,8 @@ row_undo_mod_del_unmark_sec_and_undo_update(
 	upd_t*			update;
 	dberr_t			err		= DB_SUCCESS;
 	big_rec_t*		dummy_big_rec;
-	mtr_t			mtr;
 	trx_t*			trx		= thr_get_trx(thr);
+	mtr_t			mtr{trx};
 	const ulint		flags
 		= BTR_KEEP_SYS_FLAG | BTR_NO_LOCKING_FLAG;
 	const auto		orig_mode = mode;

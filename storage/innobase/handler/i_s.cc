@@ -4545,10 +4545,6 @@ i_s_sys_tables_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_tables_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -4556,6 +4552,10 @@ i_s_sys_tables_fill_table(
 	if (check_global_access(thd, PROCESS_ACL)) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	mtr.start();
 	dict_sys.lock(SRW_LOCK_CALL);
@@ -4774,11 +4774,6 @@ i_s_sys_tables_fill_table_stats(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_tables_fill_table_stats");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -4786,6 +4781,11 @@ i_s_sys_tables_fill_table_stats(
 	if (check_global_access(thd, PROCESS_ACL)) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	mtr.start();
 	dict_sys.lock(SRW_LOCK_CALL);
@@ -4996,12 +4996,6 @@ i_s_sys_indexes_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t		pcur;
-	const rec_t*		rec;
-	mem_heap_t*		heap;
-	mtr_t			mtr;
-	int			err = 0;
-
 	DBUG_ENTER("i_s_sys_indexes_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5009,6 +5003,12 @@ i_s_sys_indexes_fill_table(
 	if (check_global_access(thd, PROCESS_ACL)) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t		pcur;
+	const rec_t*		rec;
+	mem_heap_t*		heap;
+	mtr_t			mtr{thd_to_trx(thd)};
+	int			err = 0;
 
 	heap = mem_heap_create(1000);
 	dict_sys.lock(SRW_LOCK_CALL);
@@ -5208,13 +5208,6 @@ i_s_sys_columns_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	const char*	col_name;
-	mem_heap_t*	heap;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_columns_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5222,6 +5215,13 @@ i_s_sys_columns_fill_table(
 	if (check_global_access(thd, PROCESS_ACL)) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	const char*	col_name;
+	mem_heap_t*	heap;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	heap = mem_heap_create(1000);
 	mtr.start();
@@ -5400,13 +5400,6 @@ i_s_sys_virtual_fill_table(
 	TABLE_LIST*	tables,
 	Item*		)
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	ulint		pos;
-	ulint		base_pos;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_virtual_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5414,6 +5407,13 @@ i_s_sys_virtual_fill_table(
 	if (check_global_access(thd, PROCESS_ACL) || !dict_sys.sys_virtual) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	ulint		pos;
+	ulint		base_pos;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	mtr.start();
 	dict_sys.lock(SRW_LOCK_CALL);
@@ -5582,13 +5582,6 @@ i_s_sys_fields_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	mem_heap_t*	heap;
-	index_id_t	last_id;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_fields_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5597,6 +5590,13 @@ i_s_sys_fields_fill_table(
 
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	mem_heap_t*	heap;
+	index_id_t	last_id;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	heap = mem_heap_create(1000);
 	mtr.start();
@@ -5784,12 +5784,6 @@ i_s_sys_foreign_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	mem_heap_t*	heap;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_foreign_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5797,6 +5791,12 @@ i_s_sys_foreign_fill_table(
 	if (check_global_access(thd, PROCESS_ACL) || !dict_sys.sys_foreign) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	mem_heap_t*	heap;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	heap = mem_heap_create(1000);
 	mtr.start();
@@ -5972,12 +5972,6 @@ i_s_sys_foreign_cols_fill_table(
 	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
 	Item*		)	/*!< in: condition (not used) */
 {
-	btr_pcur_t	pcur;
-	const rec_t*	rec;
-	mem_heap_t*	heap;
-	mtr_t		mtr;
-	int		err = 0;
-
 	DBUG_ENTER("i_s_sys_foreign_cols_fill_table");
 	RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
 
@@ -5986,6 +5980,12 @@ i_s_sys_foreign_cols_fill_table(
 	    || !dict_sys.sys_foreign_cols) {
 		DBUG_RETURN(0);
 	}
+
+	btr_pcur_t	pcur;
+	const rec_t*	rec;
+	mem_heap_t*	heap;
+	mtr_t		mtr{thd_to_trx(thd)};
+	int		err = 0;
 
 	heap = mem_heap_create(1000);
 	mtr.start();

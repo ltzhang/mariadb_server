@@ -1163,7 +1163,7 @@ fil_space_t *recv_sys_t::recover_deferred(const recv_sys_t::map::iterator &p,
 
   if (!p->first.page_no() && p->second.skip_read)
   {
-    mtr_t mtr;
+    mtr_t mtr{nullptr};
     ut_ad(!p->second.being_processed);
     p->second.being_processed= 1;
     init &init= mlog_init.last(p->first);
@@ -3621,7 +3621,7 @@ ATTRIBUTE_COLD void recv_sys_t::set_corrupt_fs() noexcept
 @return whether the page was recovered correctly */
 bool recv_recover_page(fil_space_t* space, buf_page_t* bpage)
 {
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   mtr.start();
   mtr.set_log_mode(MTR_LOG_NO_REDO);
 
@@ -3676,7 +3676,7 @@ void IORequest::fake_read_complete(os_offset_t offset) const noexcept
   ut_ad(recv_recovery_is_on());
   ut_ad(offset);
 
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   mtr.start();
   mtr.set_log_mode(MTR_LOG_NO_REDO);
 
@@ -3993,7 +3993,7 @@ ATTRIBUTE_COLD buf_block_t *recv_sys_t::recover_low(const page_id_t page_id)
     init &init= mlog_init.last(page_id);
     mysql_mutex_unlock(&mutex);
     buf_block_t *free_block= buf_LRU_get_free_block(false);
-    mtr_t mtr;
+    mtr_t mtr{nullptr};
     buf_block_t *block= recover_low(p, mtr, free_block, init);
     p->second.being_processed= -1;
     ut_ad(!block || block == reinterpret_cast<buf_block_t*>(-1) ||

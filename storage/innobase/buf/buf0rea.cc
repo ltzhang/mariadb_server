@@ -85,6 +85,7 @@ then this function does nothing.
 Sets the io_fix flag to BUF_IO_READ and sets a non-recursive exclusive lock
 on the buffer frame. The io-handler must take care that the flag is cleared
 and the lock released later.
+@param[in,out]	trx			transaction
 @param[in]	mode			BUF_READ_IBUF_PAGES_ONLY, ...
 @param[in]	page_id			page id
 @param[in]	zip_size		ROW_FORMAT=COMPRESSED page size, or 0
@@ -93,10 +94,11 @@ and the lock released later.
 @return pointer to the block
 @retval	NULL	in case of an error */
 TRANSACTIONAL_TARGET
-static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
+static buf_page_t* buf_page_init_for_read(trx_t *trx,
+                                          ulint mode, const page_id_t page_id,
                                           ulint zip_size, bool unzip) noexcept
 {
-  mtr_t mtr;
+  mtr_t mtr{trx};
 
   if (mode == BUF_READ_IBUF_PAGES_ONLY)
   {
@@ -299,11 +301,12 @@ buf_read_page_low(
 		sync = true;
 	}
 
+        trx_t *const trx= thd ? thd_to_trx(thd) : nullptr;
 	/* The following call will also check if the tablespace does not exist
 	or is being dropped; if we succeed in initing the page in the buffer
 	pool for read, then DISCARD cannot proceed until the read has
 	completed */
-	bpage = buf_page_init_for_read(mode, page_id, zip_size, unzip);
+	bpage = buf_page_init_for_read(trx, mode, page_id, zip_size, unzip);
 
 	if (!bpage) {
 		space->release();
@@ -312,7 +315,6 @@ buf_read_page_low(
 
 	ut_ad(bpage->in_file());
 	ulonglong mariadb_timer = 0;
-        trx_t *const trx= thd ? thd_to_trx(thd) : nullptr;
 
 	thd_wait_begin(thd, THD_WAIT_DISKIO);
 
@@ -702,7 +704,8 @@ void buf_read_recover(fil_space_t *space, const page_id_t page_id,
 
   if (init)
   {
-    if (buf_page_t *bpage= buf_page_init_for_read(BUF_READ_ANY_PAGE, page_id,
+    if (buf_page_t *bpage= buf_page_init_for_read(nullptr,
+                                                  BUF_READ_ANY_PAGE, page_id,
                                                   zip_size, true))
     {
       ut_ad(bpage->in_file());

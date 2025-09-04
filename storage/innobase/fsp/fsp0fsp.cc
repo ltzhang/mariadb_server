@@ -2534,7 +2534,7 @@ fseg_free_page_low(
 #ifdef BTR_CUR_HASH_ADAPT
 	if (ahi) {
 		btr_search_drop_page_hash_when_freed(
-			page_id_t(space->id, offset));
+			mtr, page_id_t(space->id, offset));
 	}
 #endif /* BTR_CUR_HASH_ADAPT */
 
@@ -2660,27 +2660,28 @@ dberr_t fseg_free_page(fseg_header_t *seg_header, fil_space_t *space,
 }
 
 /** Determine whether a page is allocated.
+@param mtr     mini-transaction
 @param space   tablespace
 @param page    page number
 @return error code
 @retval DB_SUCCESS             if the page is marked as free
 @retval DB_SUCCESS_LOCKED_REC  if the page is marked as allocated */
-dberr_t fseg_page_is_allocated(fil_space_t *space, unsigned page)
+dberr_t fseg_page_is_allocated(mtr_t *mtr, fil_space_t *space, unsigned page)
+  noexcept
 {
-  mtr_t mtr;
   uint32_t dpage= xdes_calc_descriptor_page(space->zip_size(), page);
   const unsigned zip_size= space->zip_size();
   dberr_t err= DB_SUCCESS;
+  const auto sp= mtr->get_savepoint();
 
-  mtr.start();
   if (!space->is_owner())
-    mtr.x_lock_space(space);
+    mtr->x_lock_space(space);
 
   if (page >= space->free_limit || page >= space->size_in_header);
   else if (const buf_block_t *b=
            buf_page_get_gen(page_id_t(space->id, dpage), space->zip_size(),
                             RW_S_LATCH, nullptr, BUF_GET_POSSIBLY_FREED,
-                            &mtr, &err))
+                            mtr, &err))
   {
     if (!dpage &&
         (space->free_limit !=
@@ -2697,7 +2698,7 @@ dberr_t fseg_page_is_allocated(fil_space_t *space, unsigned page)
         : DB_SUCCESS_LOCKED_REC;
   }
 
-  mtr.commit();
+  mtr->rollback_to_savepoint(sp);
   return err;
 }
 
@@ -2750,6 +2751,7 @@ fseg_free_extent(
 				if the page is found in the pool and
 				is hashed */
 				btr_search_drop_page_hash_when_freed(
+					mtr,
 					page_id_t(space->id,
 						 first_page_in_extent + i));
 			}

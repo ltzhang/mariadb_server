@@ -842,7 +842,7 @@ btr_estimate_number_of_different_key_vals(dict_index_t* index,
 	ulint		not_empty_flag	= 0;
 	ulint		total_external_size = 0;
 	uintmax_t	add_on;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr};
 	mem_heap_t*	heap		= NULL;
 	rec_offs*	offsets_rec	= NULL;
 	rec_offs*	offsets_next_rec = NULL;
@@ -1142,7 +1142,7 @@ dummy_empty:
 		   || !index->table->space) {
 		goto dummy_empty;
 	} else {
-		mtr_t	mtr;
+		mtr_t	mtr{nullptr}; // TODO
 
 		mtr.start();
 		mtr_sx_lock_index(index, &mtr);
@@ -1837,6 +1837,7 @@ distinct records on the leaf page, when looking at the fist n_prefix
 columns. Also calculate the number of external pages pointed by records
 on the leaf page.
 @param[in]	cur			cursor
+@param[in,out]	mtr			mini-transaction
 @param[in]	n_prefix		look at the first n_prefix columns
 when comparing records
 @param[out]	n_diff			number of distinct records
@@ -1846,6 +1847,7 @@ static
 void
 dict_stats_analyze_index_below_cur(
 	const btr_cur_t*	cur,
+	mtr_t*			mtr,
 	ulint			n_prefix,
 	ib_uint64_t*		n_diff,
 	ib_uint64_t*		n_external_pages)
@@ -1859,8 +1861,8 @@ dict_stats_analyze_index_below_cur(
 	rec_offs*	offsets2;
 	rec_offs*	offsets_rec;
 	ulint		size;
-	mtr_t		mtr;
 
+	const auto sp = mtr->get_savepoint();
 	index = btr_cur_get_index(cur);
 
 	/* Allocate offsets for the record and the node pointer, for
@@ -1900,15 +1902,13 @@ dict_stats_analyze_index_below_cur(
 	function without analyzing any leaf pages */
 	*n_external_pages = 0;
 
-	mtr_start(&mtr);
-
 	/* descend to the leaf level on the B-tree */
 	for (;;) {
 		dberr_t err;
 
 		block = buf_page_get_gen(page_id, zip_size,
 					 RW_S_LATCH, NULL, BUF_GET,
-					 &mtr, &err,
+					 mtr, &err,
 					 !index->is_clust()
 					 && 1 == btr_page_get_level(page));
 		if (!block) {
@@ -1935,17 +1935,14 @@ dict_stats_analyze_index_below_cur(
 		ut_a(*n_diff > 0);
 
 		if (*n_diff == 1) {
-			mtr_commit(&mtr);
-
 			/* page has all keys equal and the end of the page
 			was reached by dict_stats_scan_page(), no need to
 			descend to the leaf level */
-			mem_heap_free(heap);
 			/* can't get an estimate for n_external_pages here
 			because we do not dive to the leaf level, assume no
 			external pages (*n_external_pages was assigned to 0
 			above). */
-			return;
+			goto func_exit;
 		}
 		/* else */
 
@@ -1980,7 +1977,7 @@ dict_stats_analyze_index_below_cur(
 #endif
 
 func_exit:
-	mtr_commit(&mtr);
+	mtr->rollback_to_savepoint(sp);
 	mem_heap_free(heap);
 }
 
@@ -2175,7 +2172,7 @@ dict_stats_analyze_index_for_n_prefix(
 		ib_uint64_t	n_external_pages;
 
 		dict_stats_analyze_index_below_cur(btr_pcur_get_btr_cur(&pcur),
-						   n_prefix,
+						   mtr, n_prefix,
 						   &n_diff_on_leaf_page,
 						   &n_external_pages);
 
@@ -2318,7 +2315,7 @@ static index_stats_t dict_stats_analyze_index(dict_index_t* index)
 	ulint		n_prefix;
 	ib_uint64_t	total_recs;
 	ib_uint64_t	total_pages;
-	mtr_t		mtr;
+	mtr_t		mtr{nullptr}; // TODO
 	index_stats_t	result(index->n_uniq);
 	DBUG_ENTER("dict_stats_analyze_index");
 

@@ -83,7 +83,6 @@ row_vers_build_clust_v_col(
 @param[in,out]	heap		heap memory
 @param[in,out]	v_heap		heap memory to keep virtual column tuple
 @param[in,out]	mtr		mini-transaction
-@param[in,out]	trx		transaction associated with current_thd
 @return dtuple contains virtual column data */
 dtuple_t*
 row_vers_build_cur_vrow(
@@ -95,8 +94,7 @@ row_vers_build_cur_vrow(
 	roll_ptr_t		roll_ptr,
 	mem_heap_t*		heap,
 	mem_heap_t*		v_heap,
-	mtr_t*			mtr,
-	trx_t*			trx);
+	mtr_t*			mtr);
 
 /*****************************************************************//**
 Constructs the version of a clustered index record which a consistent
@@ -136,7 +134,6 @@ which should be seen by a semi-consistent read. */
 void
 row_vers_build_for_semi_consistent_read(
 /*====================================*/
-	trx_t*		caller_trx,/*!<in/out: trx of current thread */
 	const rec_t*	rec,	/*!< in: record in a clustered index; the
 				caller must have a latch on the page; this
 				latch locks the top of the stack of versions

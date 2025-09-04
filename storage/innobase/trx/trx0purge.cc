@@ -358,7 +358,7 @@ void purge_sys_t::rseg_enable(trx_rseg_t &rseg)
 inline dberr_t purge_sys_t::iterator::free_history_rseg(trx_rseg_t &rseg) const
 {
   fil_addr_t hdr_addr;
-  mtr_t mtr;
+  mtr_t mtr{nullptr};
   bool freed= false;
   uint32_t rseg_ref= 0;
   const auto last_boffset= srv_page_size - TRX_UNDO_LOG_OLD_HDR_SIZE;
@@ -717,7 +717,7 @@ not_free:
 
     log_free_check();
 
-    mtr_t mtr;
+    mtr_t mtr{nullptr};
     mtr.start();
     mtr.x_lock_space(space);
     /* Associate the undo tablespace with mtr.

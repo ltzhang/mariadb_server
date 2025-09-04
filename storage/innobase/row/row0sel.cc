@@ -880,7 +880,7 @@ row_sel_build_committed_vers_for_mysql(
 			rec_offs_size(*offsets));
 	}
 
-	row_vers_build_for_semi_consistent_read(prebuilt->trx,
+	row_vers_build_for_semi_consistent_read(
 		rec, mtr, clust_index, offsets, offset_heap,
 		prebuilt->old_vers_heap, old_vers, vrow);
 }
@@ -1669,7 +1669,7 @@ row_sel(
 {
 	dict_index_t*	index;
 	plan_t*		plan;
-	mtr_t		mtr;
+	mtr_t		mtr{thr_get_trx(thr)};
 	ibool		moved;
 	rec_t*		rec;
 	rec_t*		old_vers;
@@ -4520,7 +4520,7 @@ early_not_found:
 	/* if the query is a plain locking SELECT, and the isolation level
 	is <= TRX_ISO_READ_COMMITTED, then this is set to FALSE */
 	bool did_semi_consistent_read = false;
-	mtr_t mtr;
+	mtr_t mtr{trx};
 	mtr.start();
 
 	mem_heap_t*	heap				= NULL;
@@ -5999,7 +5999,7 @@ row_count_rtree_recs(
 {
 	dict_index_t*	index		= prebuilt->index;
 	dberr_t		ret		= DB_SUCCESS;
-	mtr_t		mtr;
+	mtr_t		mtr{prebuilt->trx};
 	mem_heap_t*	heap;
 	dtuple_t*	entry;
 	dtuple_t*	search_entry	= prebuilt->search_tuple;
@@ -6236,8 +6236,7 @@ dberr_t row_check_index(row_prebuilt_t *prebuilt, ulint *n_rows)
 
   dtuple_t *prev_entry= nullptr;
   trx_t *const trx{prebuilt->trx};
-  THD *const thd{prebuilt->trx->mysql_thd};
-  mtr_t mtr;
+  mtr_t mtr{trx};
   mtr.start();
 
   dict_index_t *clust_index= dict_table_get_first_index(prebuilt->table);
@@ -6252,7 +6251,7 @@ func_exit:
   }
 
   if (const trx_id_t bulk_trx_id= index->table->bulk_trx_id)
-    if (!prebuilt->trx->read_view.changes_visible(bulk_trx_id))
+    if (!trx->read_view.changes_visible(bulk_trx_id))
       goto func_exit;
 
   ReadView check_table_extended_view;
@@ -6322,7 +6321,8 @@ rec_loop:
   {
     if (*n_rows || !index->is_instant())
     {
-      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
+      push_warning_printf(trx->mysql_thd,
+                          Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
                           "InnoDB: invalid record encountered");
       prebuilt->autoinc_error= DB_INDEX_CORRUPT;
     }
@@ -6347,7 +6347,7 @@ rec_loop:
     {
     invalid_trx_id:
       if (prebuilt->autoinc_error == DB_SUCCESS)
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+        push_warning_printf(trx->mysql_thd, Sql_condition::WARN_LEVEL_WARN,
                             ER_NOT_KEYFILE,
                             "InnoDB: DB_TRX_ID=" TRX_ID_FMT
                             " exceeds the system-wide maximum",
@@ -6393,7 +6393,7 @@ rec_loop:
         << index->table->name << ": "
         << rec_offsets_print(rec, offsets);
       prebuilt->autoinc_error= DB_MISSING_HISTORY;
-      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+      push_warning_printf(trx->mysql_thd, Sql_condition::WARN_LEVEL_WARN,
                           ER_NOT_KEYFILE, "InnoDB: %s", w.m_oss.str().c_str());
     }
 
@@ -6449,7 +6449,7 @@ rec_loop:
             w << "Clustered index record not found for index "
               << index->name << " of table " << index->table->name
               << ": " << rec_offsets_print(rec, offsets);
-            push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+            push_warning_printf(trx->mysql_thd, Sql_condition::WARN_LEVEL_WARN,
                                 ER_NOT_KEYFILE, "InnoDB: %s",
                                 w.m_oss.str().c_str());
           }
@@ -6588,7 +6588,7 @@ rec_loop:
         {
         invalid_rec_trx_id:
           if (prebuilt->autoinc_error == DB_SUCCESS)
-            push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+            push_warning_printf(trx->mysql_thd, Sql_condition::WARN_LEVEL_WARN,
                                 ER_NOT_KEYFILE,
                                 "InnoDB: DB_TRX_ID=" TRX_ID_FMT
                                 " exceeds the system-wide maximum",
@@ -6614,8 +6614,7 @@ rec_loop:
           err= trx_undo_prev_version_build(clust_rec,
                                            clust_index, clust_offsets,
                                            vers_heap, &old_vers,
-                                           &mtr, trx,
-                                           0, nullptr, nullptr);
+                                           &mtr, 0, nullptr, nullptr);
           if (prev_heap)
             mem_heap_free(prev_heap);
           if (err != DB_SUCCESS)
@@ -6775,7 +6774,8 @@ rec_loop:
   invalid_PAGE_MAX_TRX_ID:
     if (UNIV_LIKELY(srv_force_recovery < SRV_FORCE_NO_UNDO_LOG_SCAN))
     {
-      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
+      push_warning_printf(trx->mysql_thd,
+                          Sql_condition::WARN_LEVEL_WARN, ER_NOT_KEYFILE,
                           "InnoDB: Invalid PAGE_MAX_TRX_ID=%" PRIu64
                           " in index '%-.200s'",
                           page_trx_id, index->name());
