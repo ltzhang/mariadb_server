@@ -3711,7 +3711,8 @@ bool Duplicate_weedout_picker::check_qep(JOIN *join,
 
     if (first_tab == join->const_tables)
     {
-      first_weedout_table_rec_count= 1.0;
+      first_weedout_table_rec_count=
+                                 join->positions[first_tab].prefix_record_count;
       temptable_rec_size= 0;
       dups_cost= 0.0;
     }
