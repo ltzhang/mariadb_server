@@ -7,18 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Standard build (out-of-source recommended)
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DWITH_DEBUG=1
 make -j$(nproc)
 
 # In-source build
 cmake . -DCMAKE_BUILD_TYPE=Debug
 make -j$(nproc)
-
-# Common build configurations
-cmake . -DCMAKE_BUILD_TYPE=RelWithDebInfo  # Default, with debug symbols
-cmake . -DCMAKE_BUILD_TYPE=Release         # Optimized release build
-cmake . -DWITH_EMBEDDED_SERVER=1           # Include embedded server
-cmake . -DWITH_WSREP=ON                    # Enable Galera/WSREP support
 ```
 
 ## Test Commands
@@ -81,19 +75,9 @@ ctest -V                                    # Verbose unit test output
 - **Naming**: snake_case for functions/variables, CapitalCase for classes
 - **Comments**: `//` for single-line, `/* */` for multi-line
 
-## Development Workflow
-
-- **Branches**: Feature development on `main`, bug fixes on earliest affected branch
-- **Commit messages**: Start with `MDEV-#####` JIRA ticket number
-- **Testing**: Always run relevant MTR tests before committing
-- **Code formatting**: Use `.clang-format` configuration in repository
-
 ## Debugging
 
 ```bash
-# Build with debug symbols
-cmake . -DCMAKE_BUILD_TYPE=Debug -DWITH_DEBUG=1
-
 # Run server under debugger
 gdb sql/mariadbd
 (gdb) run --defaults-file=/path/to/my.cnf
@@ -103,19 +87,34 @@ cd mysql-test
 ./mariadb-test-run.pl --debug --gdb test_name
 ```
 
-## Common Development Tasks
-
-### Adding a New System Variable
-1. Define in `sql/sys_vars.cc`
-2. Add to `sql/mysqld.h` or appropriate header
-3. Document in `mysql-test/suite/sys_vars/`
-
-### Modifying SQL Parser
-1. Edit `sql/sql_yacc.yy` (Bison grammar)
-2. Run `bison` to regenerate parser
-3. Update `sql/lex.h` for new keywords
-
-### Adding Storage Engine Feature
+### How to Add Storage Engine Feature
 1. Extend `handler` class interface if needed
 2. Implement in specific engine (e.g., `storage/innobase/`)
 3. Add tests in `mysql-test/suite/engines/`
+
+## Project Overview
+
+This project is to integrate KVT (Key-Value Transaction) storage to MariaDB under storage/kvtstore directory. The project aims to add a backend storage with KVT, which handles concurrnecy control, WAL, caching, visibility, and transactions. MariaDB acts as a frontend to the KVT storage backend. The KVT engine's interface is defined by storage/kvtstore/kvt/kvt_inc.h. We will put all relevant files under the storage/kvtstore directory, including documents, plans, records, and code files. 
+
+- In this effort, you only need to care about src/backend/kvt_am/kvt/kvt_inc.h file, which is the interface for the C++ transactional key-value store.
+
+- You should assume kvt_inc.h can interface with very powerful, transactional key value stores. Do not assume any limitations (such as durability, scalability, ACID, and so on). Assume the store has all the capabilities. 
+
+- To link a sample kvt store, you just link storage/kvtstore/kvt/kvt_memory.o, kvt_memory.o (which is produced with "g++ -c -fPIC -g -O0 kvt_memory.cpp") implements a in-memory version for test purposes. But you should not concern with its limitations, since other implementations have different capabilities. Stick to the interface.
+
+- In this project, we will leave the complexities of concurrency control, caching, locking, WAL, free space management, vacuum, ACID to KVT, assume KVT take care of them. We only use MySQL for query processing, and assume kvt handles all transaction related complexities. Again, kvt_inc.h is the definitive interface and kvt_mem.h/kvt_mem.cpp is just for testing purposes. 
+
+## Working with KVT
+
+The KVT library interface is defined in `src/backend/access/kvt_am/kvt/kvt_inc.h`. Key functions include:
+- kvt_init() - Initialize KVT system
+- kvt_set() - Store key-value pair
+- kvt_get() - Retrieve value by key
+- kvt_scan() - Scan range of keys
+- kvt_delete() - Delete key-value pair
+- Advanced update functions for computation push down. These can be used for, e.g. conditioanl scan and filtering, field/column access within a tuple without fully deserialize, and so on to optimize performance. 
+- Transaction management functions
+- Table management functions (i.e. key spaces)
+
+
+
