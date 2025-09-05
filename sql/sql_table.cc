@@ -13564,7 +13564,7 @@ bool check_engine(THD *thd, const char *db_name,
                         ha_resolve_storage_engine_name(*new_engine),
                         table_name);
   }
-  if (create_info->tmp_table() &&
+  if ((create_info->tmp_table() || create_info->global_tmp_table()) &&
       ha_check_storage_engine_flag(*new_engine, HTON_TEMPORARY_NOT_SUPPORTED))
   {
     my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
