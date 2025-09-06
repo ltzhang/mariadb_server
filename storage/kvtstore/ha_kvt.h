@@ -128,6 +128,12 @@ public:
   int index_last(uchar *buf) override;
   int index_read_last_map(uchar *buf, const uchar *key,
                           key_part_map keypart_map) override;
+  
+  // Range scan operations
+  int read_range_first(const key_range *start_key,
+                       const key_range *end_key,
+                       bool eq_range, bool sorted) override;
+  int read_range_next() override;
 
   int info(uint) override;
   int extra(enum ha_extra_function operation) override;
@@ -205,6 +211,15 @@ private:
   
   // Error tracking
   uint last_error_key;
+  
+  // Range scan state
+  bool in_range_scan;
+  key_range saved_start_key;
+  key_range saved_end_key;
+  bool range_eq_flag;
+  bool range_sorted;
+  std::vector<std::pair<KVTKey, std::string>> range_scan_results;
+  size_t range_scan_position;
 };
 
 #endif
