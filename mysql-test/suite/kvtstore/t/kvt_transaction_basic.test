@@ -1,0 +1,178 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 4: Basic Transaction Tests
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo #
+--echo # Test 1: Basic BEGIN/COMMIT
+--echo #
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  value VARCHAR(50)
+) ENGINE=KVT;
+
+BEGIN;
+INSERT INTO t1 VALUES (1, 'First');
+INSERT INTO t1 VALUES (2, 'Second');
+COMMIT;
+
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Test 2: Basic ROLLBACK
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (3, 'Third');
+INSERT INTO t1 VALUES (4, 'Fourth');
+SELECT * FROM t1 ORDER BY id;  # Should see all 4 rows
+ROLLBACK;
+
+SELECT * FROM t1 ORDER BY id;  # Should only see first 2 rows
+
+--echo #
+--echo # Test 3: Autocommit mode
+--echo #
+SET autocommit=1;
+INSERT INTO t1 VALUES (5, 'Fifth');  # Should auto-commit
+
+# Start another session to verify
+--connect (con1,localhost,root,,)
+SELECT * FROM t1 WHERE id = 5;  # Should see the row
+--disconnect con1
+--connection default
+
+--echo #
+--echo # Test 4: Disable autocommit
+--echo #
+SET autocommit=0;
+INSERT INTO t1 VALUES (6, 'Sixth');
+INSERT INTO t1 VALUES (7, 'Seventh');
+
+# Another session shouldn't see uncommitted data
+--connect (con1,localhost,root,,)
+SELECT * FROM t1 WHERE id >= 6;  # Should not see rows 6,7
+--disconnect con1
+--connection default
+
+COMMIT;
+
+# Now another session should see them
+--connect (con1,localhost,root,,)
+SELECT * FROM t1 WHERE id >= 6 ORDER BY id;  # Should see rows 6,7
+--disconnect con1
+--connection default
+
+SET autocommit=1;  # Reset
+
+--echo #
+--echo # Test 5: Multi-statement transaction
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (8, 'Eighth');
+UPDATE t1 SET value = 'Updated' WHERE id = 1;
+DELETE FROM t1 WHERE id = 2;
+SELECT * FROM t1 ORDER BY id;
+COMMIT;
+
+SELECT * FROM t1 ORDER BY id;  # Verify committed changes
+
+--echo #
+--echo # Test 6: Rollback after error
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (9, 'Ninth');
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (9, 'Duplicate');  # Should fail
+ROLLBACK;
+
+SELECT * FROM t1 WHERE id = 9;  # Should not exist
+
+--echo #
+--echo # Test 7: START TRANSACTION
+--echo #
+START TRANSACTION;
+INSERT INTO t1 VALUES (10, 'Tenth');
+UPDATE t1 SET value = 'Modified' WHERE id = 3;
+COMMIT;
+
+SELECT * FROM t1 WHERE id IN (3, 10) ORDER BY id;
+
+--echo #
+--echo # Test 8: Transaction with SELECT FOR UPDATE
+--echo #
+BEGIN;
+SELECT * FROM t1 WHERE id = 5 FOR UPDATE;
+UPDATE t1 SET value = 'Locked and Updated' WHERE id = 5;
+COMMIT;
+
+SELECT * FROM t1 WHERE id = 5;
+
+--echo #
+--echo # Test 9: Empty transaction
+--echo #
+BEGIN;
+COMMIT;  # Should succeed
+
+BEGIN;
+ROLLBACK;  # Should succeed
+
+--echo #
+--echo # Test 10: Transaction across multiple tables
+--echo #
+CREATE TABLE t2 (
+  id INT PRIMARY KEY,
+  ref_id INT,
+  data VARCHAR(50)
+) ENGINE=KVT;
+
+BEGIN;
+INSERT INTO t1 VALUES (11, 'Parent');
+INSERT INTO t2 VALUES (1, 11, 'Child1');
+INSERT INTO t2 VALUES (2, 11, 'Child2');
+COMMIT;
+
+SELECT t1.*, t2.* FROM t1 JOIN t2 ON t1.id = t2.ref_id ORDER BY t2.id;
+
+BEGIN;
+DELETE FROM t2 WHERE ref_id = 11;
+DELETE FROM t1 WHERE id = 11;
+ROLLBACK;
+
+# Data should still be there
+SELECT COUNT(*) FROM t1 WHERE id = 11;
+SELECT COUNT(*) FROM t2 WHERE ref_id = 11;
+
+--echo #
+--echo # Test 11: COMMIT AND CHAIN
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (12, 'Twelve');
+COMMIT AND CHAIN;  # Commits and starts new transaction
+INSERT INTO t1 VALUES (13, 'Thirteen');
+COMMIT;
+
+SELECT * FROM t1 WHERE id >= 12 ORDER BY id;
+
+--echo #
+--echo # Test 12: ROLLBACK AND CHAIN
+--echo #
+BEGIN;
+INSERT INTO t1 VALUES (14, 'Fourteen');
+ROLLBACK AND CHAIN;  # Rollback and start new transaction
+INSERT INTO t1 VALUES (15, 'Fifteen');
+COMMIT;
+
+SELECT * FROM t1 WHERE id >= 14 ORDER BY id;  # Should only see 15
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE t1, t2;
+
+--echo # Phase 4 basic transaction tests completed

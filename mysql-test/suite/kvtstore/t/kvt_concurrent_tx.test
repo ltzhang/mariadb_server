@@ -1,0 +1,305 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 4: Concurrent Transaction Tests
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+CREATE TABLE tx_test (
+  id INT PRIMARY KEY,
+  value INT,
+  version INT DEFAULT 0
+) ENGINE=KVT;
+
+INSERT INTO tx_test VALUES (1, 100, 0), (2, 200, 0), (3, 300, 0);
+
+--echo #
+--echo # Test 1: Concurrent reads
+--echo #
+
+--connect (reader1,localhost,root,,)
+BEGIN;
+SELECT * FROM tx_test ORDER BY id;
+
+--connect (reader2,localhost,root,,)
+BEGIN;
+SELECT * FROM tx_test ORDER BY id;  # Both should see same data
+
+--connection reader1
+COMMIT;
+
+--connection reader2
+COMMIT;
+
+--disconnect reader1
+--disconnect reader2
+
+--echo #
+--echo # Test 2: Concurrent writes to different rows
+--echo #
+
+--connect (writer1,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 111, version = version + 1 WHERE id = 1;
+
+--connect (writer2,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 222, version = version + 1 WHERE id = 2;
+
+--connection writer1
+SELECT * FROM tx_test WHERE id = 1;  # See own update
+COMMIT;
+
+--connection writer2
+SELECT * FROM tx_test WHERE id = 2;  # See own update
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test ORDER BY id;  # Both updates visible
+
+--disconnect writer1
+--disconnect writer2
+
+--echo #
+--echo # Test 3: Concurrent writes to same row (conflict)
+--echo #
+
+--connect (tx1,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 150, version = version + 1 WHERE id = 1;
+
+--connect (tx2,localhost,root,,)
+BEGIN;
+# This may block waiting for tx1
+--send UPDATE tx_test SET value = 175, version = version + 1 WHERE id = 1
+
+--connection tx1
+SELECT * FROM tx_test WHERE id = 1;  # Should see 150
+COMMIT;
+
+--connection tx2
+--reap  # Complete the update
+SELECT * FROM tx_test WHERE id = 1;  # Should see 175
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test WHERE id = 1;  # Final value should be 175
+
+--disconnect tx1
+--disconnect tx2
+
+--echo #
+--echo # Test 4: Read-write conflict
+--echo #
+
+--connect (reader,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT * FROM tx_test WHERE id = 2;  # Read value
+
+--connect (writer,localhost,root,,)
+UPDATE tx_test SET value = 250, version = version + 1 WHERE id = 2;
+
+--connection reader
+SELECT * FROM tx_test WHERE id = 2;  # Should still see old value (repeatable read)
+COMMIT;
+
+SELECT * FROM tx_test WHERE id = 2;  # Now see new value
+
+--disconnect reader
+--disconnect writer
+
+--echo #
+--echo # Test 5: Deadlock scenario
+--echo #
+
+--connect (tx1,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 100 WHERE id = 1;
+
+--connect (tx2,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 200 WHERE id = 2;
+
+--connection tx1
+# Try to update row locked by tx2
+--send UPDATE tx_test SET value = 150 WHERE id = 2
+
+--connection tx2
+# Try to update row locked by tx1 - potential deadlock
+--error 0,ER_LOCK_DEADLOCK,ER_LOCK_WAIT_TIMEOUT
+UPDATE tx_test SET value = 250 WHERE id = 1
+
+# If we got here without deadlock, commit
+--error 0
+COMMIT
+
+--connection tx1
+--error 0
+--reap
+--error 0
+COMMIT
+
+--connection default
+SELECT * FROM tx_test ORDER BY id;
+
+--disconnect tx1
+--disconnect tx2
+
+--echo #
+--echo # Test 6: Lock wait timeout
+--echo #
+SET @old_lock_wait_timeout = @@lock_wait_timeout;
+SET lock_wait_timeout = 1;  # 1 second timeout
+
+--connect (holder,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 999 WHERE id = 3;
+
+--connection default
+--error 0,ER_LOCK_WAIT_TIMEOUT
+UPDATE tx_test SET value = 888 WHERE id = 3;  # Should timeout
+
+--connection holder
+COMMIT;
+
+--connection default
+# Now should work
+UPDATE tx_test SET value = 777 WHERE id = 3;
+SELECT * FROM tx_test WHERE id = 3;
+
+SET lock_wait_timeout = @old_lock_wait_timeout;
+
+--disconnect holder
+
+--echo #
+--echo # Test 7: Concurrent inserts
+--echo #
+
+DELETE FROM tx_test WHERE id > 3;
+
+--connect (ins1,localhost,root,,)
+BEGIN;
+INSERT INTO tx_test VALUES (4, 400, 0);
+
+--connect (ins2,localhost,root,,)
+BEGIN;
+INSERT INTO tx_test VALUES (5, 500, 0);
+
+--connect (ins3,localhost,root,,)
+BEGIN;
+--error 0,ER_DUP_ENTRY
+INSERT INTO tx_test VALUES (4, 444, 0);  # Duplicate - may fail or wait
+
+--connection ins1
+COMMIT;
+
+--connection ins2
+COMMIT;
+
+--connection ins3
+--error 0
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test WHERE id >= 4 ORDER BY id;
+
+--disconnect ins1
+--disconnect ins2
+--disconnect ins3
+
+--echo #
+--echo # Test 8: Concurrent deletes
+--echo #
+
+--connect (del1,localhost,root,,)
+BEGIN;
+DELETE FROM tx_test WHERE id = 4;
+
+--connect (del2,localhost,root,,)
+BEGIN;
+# Try to delete same row - may block
+--send DELETE FROM tx_test WHERE id = 4
+
+--connection del1
+COMMIT;
+
+--connection del2
+--reap  # Should complete but affect 0 rows
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test WHERE id = 4;  # Should not exist
+
+--disconnect del1
+--disconnect del2
+
+--echo #
+--echo # Test 9: Mixed concurrent operations
+--echo #
+
+--connect (mix1,localhost,root,,)
+BEGIN;
+INSERT INTO tx_test VALUES (6, 600, 0);
+UPDATE tx_test SET value = 111 WHERE id = 1;
+
+--connect (mix2,localhost,root,,)
+BEGIN;
+DELETE FROM tx_test WHERE id = 2;
+INSERT INTO tx_test VALUES (7, 700, 0);
+
+--connect (mix3,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 333 WHERE id = 3;
+SELECT COUNT(*) FROM tx_test;
+
+--connection mix1
+COMMIT;
+
+--connection mix2
+COMMIT;
+
+--connection mix3
+SELECT COUNT(*) FROM tx_test;  # May see different count
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test ORDER BY id;
+
+--disconnect mix1
+--disconnect mix2
+--disconnect mix3
+
+--echo #
+--echo # Test 10: Long-running transaction
+--echo #
+
+--connect (long_tx,localhost,root,,)
+BEGIN;
+UPDATE tx_test SET value = 999 WHERE id = 1;
+SELECT SLEEP(2);  # Simulate long operation
+
+--connect (short_tx,localhost,root,,)
+# Short transactions shouldn't be blocked by unrelated rows
+UPDATE tx_test SET value = 555 WHERE id = 5;
+SELECT * FROM tx_test WHERE id = 5;
+
+--connection long_tx
+COMMIT;
+
+--connection default
+SELECT * FROM tx_test WHERE id IN (1, 5) ORDER BY id;
+
+--disconnect long_tx
+--disconnect short_tx
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE tx_test;
+
+--echo # Phase 4 concurrent transaction tests completed

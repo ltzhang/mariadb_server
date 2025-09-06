@@ -1,0 +1,220 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 4: Isolation Level Tests
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+CREATE TABLE iso_test (
+  id INT PRIMARY KEY,
+  value INT,
+  data VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO iso_test VALUES (1, 100, 'Initial');
+
+--echo #
+--echo # Test 1: READ UNCOMMITTED (dirty reads allowed)
+--echo #
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+BEGIN;
+
+--connection default
+BEGIN;
+UPDATE iso_test SET value = 200 WHERE id = 1;
+
+--connection con1
+# Should see uncommitted change (dirty read)
+SELECT * FROM iso_test WHERE id = 1;
+COMMIT;
+
+--connection default
+ROLLBACK;  # Rollback the change
+
+--connection con1
+# Value should be back to original
+SELECT * FROM iso_test WHERE id = 1;
+
+--disconnect con1
+
+--echo #
+--echo # Test 2: READ COMMITTED (no dirty reads)
+--echo #
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+
+--connection default
+BEGIN;
+UPDATE iso_test SET value = 300 WHERE id = 1;
+
+--connection con1
+# Should NOT see uncommitted change
+SELECT * FROM iso_test WHERE id = 1;
+
+--connection default
+COMMIT;
+
+--connection con1
+# Now should see committed change
+SELECT * FROM iso_test WHERE id = 1;
+COMMIT;
+
+--disconnect con1
+
+--echo #
+--echo # Test 3: REPEATABLE READ (consistent reads)
+--echo #
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT * FROM iso_test WHERE id = 1;  # First read
+
+--connection default
+UPDATE iso_test SET value = 400 WHERE id = 1;
+INSERT INTO iso_test VALUES (2, 200, 'New');
+
+--connection con1
+# Should still see old value (repeatable read)
+SELECT * FROM iso_test WHERE id = 1;
+# Should not see new row (phantom prevention)
+SELECT * FROM iso_test ORDER BY id;
+COMMIT;
+
+# After commit, should see new values
+SELECT * FROM iso_test ORDER BY id;
+
+--disconnect con1
+
+--echo #
+--echo # Test 4: SERIALIZABLE (strictest isolation)
+--echo #
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+BEGIN;
+SELECT * FROM iso_test WHERE id = 1;
+
+--connection default
+# Try to modify - may block or fail depending on implementation
+--send UPDATE iso_test SET value = 500 WHERE id = 1
+
+--connection con1
+# Sleep a bit to ensure update is waiting
+--sleep 1
+COMMIT;
+
+--connection default
+--reap  # Complete the update
+
+SELECT * FROM iso_test WHERE id = 1;
+
+--disconnect con1
+
+--echo #
+--echo # Test 5: Non-repeatable reads test
+--echo #
+DELETE FROM iso_test WHERE id > 1;
+UPDATE iso_test SET value = 100 WHERE id = 1;
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT * FROM iso_test WHERE id = 1;  # Read 1
+
+--connection default
+UPDATE iso_test SET value = 600 WHERE id = 1;
+
+--connection con1
+SELECT * FROM iso_test WHERE id = 1;  # Read 2 - different value (non-repeatable)
+COMMIT;
+
+--disconnect con1
+
+--echo #
+--echo # Test 6: Phantom reads test
+--echo #
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT COUNT(*) FROM iso_test WHERE value >= 100;  # Count rows
+
+--connection default
+INSERT INTO iso_test VALUES (3, 700, 'Phantom');
+
+--connection con1
+SELECT COUNT(*) FROM iso_test WHERE value >= 100;  # Different count (phantom)
+COMMIT;
+
+--disconnect con1
+
+--echo #
+--echo # Test 7: Isolation level persistence
+--echo #
+
+--connect (con1,localhost,root,,)
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SELECT @@transaction_isolation;
+
+BEGIN;
+SELECT @@transaction_isolation;  # Should be REPEATABLE READ
+COMMIT;
+
+# Set for next transaction only
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT @@transaction_isolation;  # Should be READ COMMITTED
+COMMIT;
+
+BEGIN;
+SELECT @@transaction_isolation;  # Should be back to REPEATABLE READ (session default)
+COMMIT;
+
+--disconnect con1
+
+--echo #
+--echo # Test 8: Concurrent inserts with different isolation levels
+--echo #
+
+DELETE FROM iso_test;
+
+--connect (con1,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+INSERT INTO iso_test VALUES (1, 100, 'Con1');
+
+--connect (con2,localhost,root,,)
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+--error 0,ER_DUP_ENTRY
+INSERT INTO iso_test VALUES (1, 200, 'Con2');  # May fail or wait
+
+--connection con1
+COMMIT;
+
+--connection con2
+# If insert didn't fail, commit it
+--error 0,ER_DUP_ENTRY
+COMMIT;
+
+--connection default
+SELECT * FROM iso_test ORDER BY id;
+
+--disconnect con1
+--disconnect con2
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE iso_test;
+
+--echo # Phase 4 isolation level tests completed

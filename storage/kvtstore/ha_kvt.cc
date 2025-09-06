@@ -22,6 +22,7 @@
 #include "probes_mysql.h"
 #include "sql_plugin.h"
 #include "item.h"
+#include "kvt_transaction_manager.h"
 #include <mysql/plugin.h>
 
 static handler *kvt_create_handler(handlerton *hton,
@@ -31,9 +32,12 @@ static int kvt_init_func(void *p);
 static int kvt_deinit_func(void *p);
 static int kvt_panic_func(handlerton *hton, ha_panic_function flag);
 static void kvt_drop_database(handlerton *hton, char *path);
-static int kvt_close_connection(THD *thd);
+static int kvt_close_connection(handlerton *hton, THD *thd);
 static int kvt_commit(THD *thd, bool all);
 static int kvt_rollback(THD *thd, bool all);
+static int kvt_savepoint_set(handlerton *hton, THD *thd, void *sv);
+static int kvt_savepoint_rollback(handlerton *hton, THD *thd, void *sv);
+static int kvt_savepoint_release(handlerton *hton, THD *thd, void *sv);
 
 static HASH kvt_open_tables;
 static mysql_mutex_t kvt_mutex;
@@ -93,6 +97,10 @@ static int kvt_init_func(void *p)
   kvt_hton->close_connection = kvt_close_connection;
   kvt_hton->commit = kvt_commit;
   kvt_hton->rollback = kvt_rollback;
+  kvt_hton->savepoint_set = kvt_savepoint_set;
+  kvt_hton->savepoint_rollback = kvt_savepoint_rollback;
+  kvt_hton->savepoint_release = kvt_savepoint_release;
+  kvt_hton->savepoint_offset = sizeof(kvt_savepoint_data);
   kvt_hton->db_type = DB_TYPE_UNKNOWN;
 
   std::string error_msg;
@@ -141,8 +149,33 @@ static int kvt_panic_func(handlerton *hton, ha_panic_function flag)
   return 0;
 }
 
+static int kvt_close_connection(handlerton *hton, THD *thd)
+{
+  DBUG_ENTER("kvt_close_connection");
+  
+  // Clean up any active transactions for this connection
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  tx_mgr->cleanup_transaction(thd);
+  
+  DBUG_RETURN(0);
+}
+
 static void kvt_drop_database(handlerton *hton, char *path)
 {
+  DBUG_ENTER("kvt_drop_database");
+  
+  // Get database name from path
+  std::string path_str(path);
+  size_t last_slash = path_str.find_last_of('/');
+  std::string database = (last_slash != std::string::npos) 
+                         ? path_str.substr(last_slash + 1) 
+                         : path_str;
+  
+  // Drop the database from catalog
+  auto* catalog = kvt_catalog::CatalogManager::get_instance();
+  catalog->drop_database(database);
+  
+  DBUG_VOID_RETURN;
 }
 
 static int kvt_close_connection(THD *thd)
@@ -153,12 +186,132 @@ static int kvt_close_connection(THD *thd)
 static int kvt_commit(THD *thd, bool all)
 {
   DBUG_ENTER("kvt_commit");
+  DBUG_PRINT("info", ("all: %d", all));
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // No active transaction to commit
+    DBUG_RETURN(0);
+  }
+  
+  // Commit the transaction
+  int ret = tx_mgr->commit_transaction(thd, all);
+  
+  if (ret != 0) {
+    DBUG_PRINT("error", ("Failed to commit transaction"));
+    DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  DBUG_PRINT("info", ("Transaction committed successfully"));
   DBUG_RETURN(0);
 }
 
 static int kvt_rollback(THD *thd, bool all)
 {
   DBUG_ENTER("kvt_rollback");
+  DBUG_PRINT("info", ("all: %d", all));
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // No active transaction to rollback
+    DBUG_RETURN(0);
+  }
+  
+  // Rollback the transaction
+  int ret = tx_mgr->rollback_transaction(thd, all);
+  
+  if (ret != 0) {
+    DBUG_PRINT("error", ("Failed to rollback transaction"));
+    DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  DBUG_PRINT("info", ("Transaction rolled back successfully"));
+  DBUG_RETURN(0);
+}
+
+struct kvt_savepoint_data {
+  uint64_t savepoint_id;
+  char name[64];
+};
+
+static int kvt_savepoint_set(handlerton *hton, THD *thd, void *sv)
+{
+  DBUG_ENTER("kvt_savepoint_set");
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // No active transaction
+    DBUG_RETURN(1);
+  }
+  
+  kvt_savepoint_data *savepoint = (kvt_savepoint_data*)sv;
+  
+  // Generate savepoint name
+  snprintf(savepoint->name, sizeof(savepoint->name), "sp_%p_%lu", 
+           thd, (unsigned long)time(nullptr));
+  
+  // Set the savepoint
+  int ret = tx_mgr->savepoint_set(thd, savepoint->name);
+  
+  if (ret != 0) {
+    DBUG_PRINT("error", ("Failed to set savepoint"));
+    DBUG_RETURN(1);
+  }
+  
+  DBUG_PRINT("info", ("Savepoint set: %s", savepoint->name));
+  DBUG_RETURN(0);
+}
+
+static int kvt_savepoint_rollback(handlerton *hton, THD *thd, void *sv)
+{
+  DBUG_ENTER("kvt_savepoint_rollback");
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // No active transaction
+    DBUG_RETURN(1);
+  }
+  
+  kvt_savepoint_data *savepoint = (kvt_savepoint_data*)sv;
+  
+  // Rollback to the savepoint
+  int ret = tx_mgr->savepoint_rollback(thd, savepoint->name);
+  
+  if (ret != 0) {
+    DBUG_PRINT("error", ("Failed to rollback to savepoint"));
+    DBUG_RETURN(1);
+  }
+  
+  DBUG_PRINT("info", ("Rolled back to savepoint: %s", savepoint->name));
+  DBUG_RETURN(0);
+}
+
+static int kvt_savepoint_release(handlerton *hton, THD *thd, void *sv)
+{
+  DBUG_ENTER("kvt_savepoint_release");
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // No active transaction
+    DBUG_RETURN(1);
+  }
+  
+  kvt_savepoint_data *savepoint = (kvt_savepoint_data*)sv;
+  
+  // Release the savepoint
+  int ret = tx_mgr->savepoint_release(thd, savepoint->name);
+  
+  if (ret != 0) {
+    DBUG_PRINT("error", ("Failed to release savepoint"));
+    DBUG_RETURN(1);
+  }
+  
+  DBUG_PRINT("info", ("Released savepoint: %s", savepoint->name));
   DBUG_RETURN(0);
 }
 
@@ -605,9 +758,84 @@ int ha_kvt::extra(enum ha_extra_function operation)
   DBUG_RETURN(0);
 }
 
+int ha_kvt::start_stmt(THD *thd, thr_lock_type lock_type)
+{
+  DBUG_ENTER("ha_kvt::start_stmt");
+  
+  // For multi-statement transactions, this is called at the start of each statement
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (!tx_mgr->has_active_transaction(thd)) {
+    // Need to start a transaction
+    int iso_level = thd_tx_isolation(thd);
+    int kvt_iso = kvt_transaction::KVTTransactionManager::map_mariadb_isolation_to_kvt(iso_level);
+    
+    uint64_t tx_id = tx_mgr->begin_transaction(thd, kvt_iso);
+    if (tx_id == 0) {
+      DBUG_RETURN(HA_ERR_GENERIC);
+    }
+    
+    this->kvt_tx_id = tx_id;
+  } else {
+    // Use existing transaction
+    this->kvt_tx_id = tx_mgr->get_transaction_id(thd);
+  }
+  
+  DBUG_RETURN(0);
+}
+
 int ha_kvt::external_lock(THD *thd, int lock_type)
 {
   DBUG_ENTER("ha_kvt::external_lock");
+  DBUG_PRINT("info", ("lock_type: %d", lock_type));
+  
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  
+  if (lock_type != F_UNLCK) {
+    // Starting a statement - ensure we have a transaction
+    if (!tx_mgr->has_active_transaction(thd)) {
+      // Get isolation level from THD
+      int iso_level = thd_tx_isolation(thd);
+      int kvt_iso = kvt_transaction::KVTTransactionManager::map_mariadb_isolation_to_kvt(iso_level);
+      
+      // Start new transaction
+      uint64_t tx_id = tx_mgr->begin_transaction(thd, kvt_iso);
+      if (tx_id == 0) {
+        DBUG_RETURN(HA_ERR_GENERIC);
+      }
+      
+      this->kvt_tx_id = tx_id;
+      DBUG_PRINT("info", ("Started new transaction: %llu", (ulonglong)tx_id));
+    } else {
+      // Use existing transaction
+      this->kvt_tx_id = tx_mgr->get_transaction_id(thd);
+      DBUG_PRINT("info", ("Using existing transaction: %llu", (ulonglong)kvt_tx_id));
+    }
+    
+    // Track statement start
+    tx_mgr->start_statement(thd);
+  } else {
+    // Ending a statement
+    if (tx_mgr->has_active_transaction(thd)) {
+      // Check if we should auto-commit
+      bool autocommit = (thd->variables.option_bits & OPTION_AUTOCOMMIT) != 0;
+      bool not_in_trans = !(thd->variables.option_bits & OPTION_BEGIN);
+      
+      if (autocommit && not_in_trans) {
+        // Auto-commit the transaction
+        DBUG_PRINT("info", ("Auto-committing transaction"));
+        int ret = tx_mgr->commit_transaction(thd);
+        if (ret != 0) {
+          DBUG_RETURN(HA_ERR_GENERIC);
+        }
+        this->kvt_tx_id = 0;
+      } else {
+        // Keep transaction active for next statement
+        tx_mgr->end_statement(thd, false);
+      }
+    }
+  }
+  
   DBUG_RETURN(0);
 }
 

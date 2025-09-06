@@ -1,0 +1,216 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 4: Savepoint Tests
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+CREATE TABLE sp_test (
+  id INT PRIMARY KEY,
+  value VARCHAR(50)
+) ENGINE=KVT;
+
+--echo #
+--echo # Test 1: Basic savepoint and rollback
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (1, 'First');
+SAVEPOINT sp1;
+INSERT INTO sp_test VALUES (2, 'Second');
+SAVEPOINT sp2;
+INSERT INTO sp_test VALUES (3, 'Third');
+
+SELECT * FROM sp_test ORDER BY id;  # Should see all 3
+
+ROLLBACK TO SAVEPOINT sp2;
+SELECT * FROM sp_test ORDER BY id;  # Should see only 1 and 2
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT * FROM sp_test ORDER BY id;  # Should see only 1
+
+COMMIT;
+
+SELECT * FROM sp_test ORDER BY id;  # Verify commit
+
+--echo #
+--echo # Test 2: Release savepoint
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (4, 'Fourth');
+SAVEPOINT sp1;
+INSERT INTO sp_test VALUES (5, 'Fifth');
+RELEASE SAVEPOINT sp1;  # Release but don't rollback
+
+# Can't rollback to released savepoint
+--error ER_SP_DOES_NOT_EXIST
+ROLLBACK TO SAVEPOINT sp1;
+
+COMMIT;
+
+SELECT * FROM sp_test WHERE id >= 4 ORDER BY id;  # Should see both 4 and 5
+
+--echo #
+--echo # Test 3: Nested savepoints
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (6, 'Six');
+SAVEPOINT sp_outer;
+INSERT INTO sp_test VALUES (7, 'Seven');
+SAVEPOINT sp_inner;
+INSERT INTO sp_test VALUES (8, 'Eight');
+
+ROLLBACK TO SAVEPOINT sp_inner;
+SELECT * FROM sp_test WHERE id >= 6 ORDER BY id;  # Should see 6, 7
+
+INSERT INTO sp_test VALUES (9, 'Nine');
+ROLLBACK TO SAVEPOINT sp_outer;
+SELECT * FROM sp_test WHERE id >= 6 ORDER BY id;  # Should see only 6
+
+COMMIT;
+
+--echo #
+--echo # Test 4: Savepoint with updates and deletes
+--echo #
+BEGIN;
+SAVEPOINT sp1;
+UPDATE sp_test SET value = 'Updated' WHERE id = 1;
+SAVEPOINT sp2;
+DELETE FROM sp_test WHERE id = 4;
+SAVEPOINT sp3;
+INSERT INTO sp_test VALUES (10, 'Ten');
+
+SELECT * FROM sp_test ORDER BY id;
+
+ROLLBACK TO SAVEPOINT sp2;
+SELECT * FROM sp_test ORDER BY id;  # Delete rolled back, update remains
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT * FROM sp_test ORDER BY id;  # Update also rolled back
+
+ROLLBACK;  # Full rollback
+
+--echo #
+--echo # Test 5: Savepoint names
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (11, 'Eleven');
+SAVEPOINT my_savepoint;
+INSERT INTO sp_test VALUES (12, 'Twelve');
+SAVEPOINT my_savepoint;  # Same name, overwrites previous
+INSERT INTO sp_test VALUES (13, 'Thirteen');
+
+ROLLBACK TO SAVEPOINT my_savepoint;
+SELECT * FROM sp_test WHERE id >= 11 ORDER BY id;  # Should see 11, 12
+
+COMMIT;
+
+--echo #
+--echo # Test 6: Savepoint and autocommit
+--echo #
+SET autocommit=0;
+
+INSERT INTO sp_test VALUES (14, 'Fourteen');
+SAVEPOINT sp1;
+INSERT INTO sp_test VALUES (15, 'Fifteen');
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT * FROM sp_test WHERE id >= 14 ORDER BY id;  # Should see only 14
+
+COMMIT;
+
+SET autocommit=1;
+
+# With autocommit=1, savepoint outside transaction should fail
+--error ER_SYNTAX_ERROR
+SAVEPOINT sp_auto;
+
+--echo #
+--echo # Test 7: Multiple savepoint operations
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (16, 'Sixteen');
+SAVEPOINT sp1;
+
+INSERT INTO sp_test VALUES (17, 'Seventeen');
+SAVEPOINT sp2;
+
+INSERT INTO sp_test VALUES (18, 'Eighteen');
+SAVEPOINT sp3;
+
+INSERT INTO sp_test VALUES (19, 'Nineteen');
+
+# Rollback to middle savepoint
+ROLLBACK TO SAVEPOINT sp2;
+INSERT INTO sp_test VALUES (20, 'Twenty');
+
+SELECT * FROM sp_test WHERE id >= 16 ORDER BY id;  # 16, 17, 20
+
+# Can still rollback to earlier savepoint
+ROLLBACK TO SAVEPOINT sp1;
+SELECT * FROM sp_test WHERE id >= 16 ORDER BY id;  # Only 16
+
+COMMIT;
+
+--echo #
+--echo # Test 8: Savepoint with errors
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (21, 'Twenty-one');
+SAVEPOINT sp1;
+
+--error ER_DUP_ENTRY
+INSERT INTO sp_test VALUES (21, 'Duplicate');  # Error
+
+# Can still use savepoint after error
+INSERT INTO sp_test VALUES (22, 'Twenty-two');
+
+SELECT * FROM sp_test WHERE id >= 21 ORDER BY id;
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT * FROM sp_test WHERE id >= 21 ORDER BY id;  # Only 21
+
+COMMIT;
+
+--echo #
+--echo # Test 9: ROLLBACK releases all savepoints
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (23, 'Twenty-three');
+SAVEPOINT sp1;
+INSERT INTO sp_test VALUES (24, 'Twenty-four');
+SAVEPOINT sp2;
+
+ROLLBACK;  # Full rollback
+
+BEGIN;
+# Previous savepoints should not exist
+--error ER_SP_DOES_NOT_EXIST
+ROLLBACK TO SAVEPOINT sp1;
+
+ROLLBACK;
+
+--echo #
+--echo # Test 10: COMMIT releases all savepoints
+--echo #
+BEGIN;
+INSERT INTO sp_test VALUES (25, 'Twenty-five');
+SAVEPOINT sp1;
+COMMIT;
+
+BEGIN;
+# Previous savepoint should not exist
+--error ER_SP_DOES_NOT_EXIST
+ROLLBACK TO SAVEPOINT sp1;
+
+ROLLBACK;
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE sp_test;
+
+--echo # Phase 4 savepoint tests completed
