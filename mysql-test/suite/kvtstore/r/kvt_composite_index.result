@@ -1,0 +1,132 @@
+# Test 1: Create table with composite PRIMARY KEY
+CREATE TABLE t1 (
+a INT,
+b VARCHAR(50),
+c DATE,
+d TEXT,
+PRIMARY KEY (a, b)
+) ENGINE=KVT;
+# Test 2: Insert data
+INSERT INTO t1 VALUES (1, 'apple', '2025-01-01', 'first row');
+INSERT INTO t1 VALUES (1, 'banana', '2025-01-02', 'second row');
+INSERT INTO t1 VALUES (2, 'apple', '2025-01-03', 'third row');
+INSERT INTO t1 VALUES (2, 'banana', '2025-01-04', 'fourth row');
+INSERT INTO t1 VALUES (3, 'cherry', '2025-01-05', 'fifth row');
+# Test 3: Query using full composite key
+SELECT * FROM t1 WHERE a = 1 AND b = 'apple';
+a	b	c	d
+1	apple	2025-01-01	first row
+SELECT * FROM t1 WHERE a = 2 AND b = 'banana';
+a	b	c	d
+2	banana	2025-01-04	fourth row
+# Test 4: Query using partial key (leftmost prefix)
+SELECT * FROM t1 WHERE a = 1 ORDER BY b;
+a	b	c	d
+1	apple	2025-01-01	first row
+1	banana	2025-01-02	second row
+SELECT * FROM t1 WHERE a = 2 ORDER BY b;
+a	b	c	d
+2	apple	2025-01-03	third row
+2	banana	2025-01-04	fourth row
+# Test 5: Range queries on composite key
+SELECT * FROM t1 WHERE a >= 1 AND a <= 2 ORDER BY a, b;
+a	b	c	d
+1	apple	2025-01-01	first row
+1	banana	2025-01-02	second row
+2	apple	2025-01-03	third row
+2	banana	2025-01-04	fourth row
+SELECT * FROM t1 WHERE a = 1 AND b >= 'apple' ORDER BY b;
+a	b	c	d
+1	apple	2025-01-01	first row
+1	banana	2025-01-02	second row
+# Test 6: Update with composite key
+UPDATE t1 SET d = 'updated' WHERE a = 1 AND b = 'apple';
+SELECT * FROM t1 WHERE a = 1 AND b = 'apple';
+a	b	c	d
+1	apple	2025-01-01	updated
+# Test 7: Delete with composite key
+DELETE FROM t1 WHERE a = 3 AND b = 'cherry';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+4
+# Test 8: Create table with multi-column INDEX
+CREATE TABLE t2 (
+id INT PRIMARY KEY,
+col1 INT,
+col2 VARCHAR(20),
+col3 DECIMAL(10,2),
+INDEX idx_composite (col1, col2, col3)
+) ENGINE=KVT;
+# Test 9: Insert data for index testing
+INSERT INTO t2 VALUES 
+(1, 10, 'aaa', 100.50),
+(2, 10, 'aaa', 200.75),
+(3, 10, 'bbb', 100.50),
+(4, 20, 'aaa', 300.25),
+(5, 20, 'bbb', 400.00);
+# Test 10: Query using composite index
+SELECT * FROM t2 WHERE col1 = 10 AND col2 = 'aaa' ORDER BY col3;
+id	col1	col2	col3
+1	10	aaa	100.50
+2	10	aaa	200.75
+SELECT * FROM t2 WHERE col1 = 10 ORDER BY col2, col3;
+id	col1	col2	col3
+1	10	aaa	100.50
+2	10	aaa	200.75
+3	10	bbb	100.50
+SELECT * FROM t2 WHERE col1 = 20 AND col2 >= 'aaa' ORDER BY col3;
+id	col1	col2	col3
+4	20	aaa	300.25
+5	20	bbb	400.00
+# Test 11: NULL handling in composite index
+CREATE TABLE t3 (
+a INT,
+b VARCHAR(10),
+c INT,
+PRIMARY KEY (a, b)
+) ENGINE=KVT;
+INSERT INTO t3 VALUES (1, 'x', 10);
+INSERT INTO t3 VALUES (2, 'y', NULL);
+INSERT INTO t3 VALUES (NULL, 'z', 30);
+ERROR 23000: Column 'a' cannot be null
+SELECT * FROM t3 ORDER BY a, b;
+a	b	c
+1	x	10
+2	y	NULL
+# Test 12: Composite UNIQUE index
+CREATE TABLE t4 (
+id INT PRIMARY KEY,
+a INT,
+b VARCHAR(10),
+UNIQUE KEY uk_ab (a, b)
+) ENGINE=KVT;
+INSERT INTO t4 VALUES (1, 10, 'x');
+INSERT INTO t4 VALUES (2, 10, 'y');
+INSERT INTO t4 VALUES (3, 20, 'x');
+INSERT INTO t4 VALUES (4, 10, 'x');
+ERROR 23000: Duplicate entry '10-x' for key 'uk_ab'
+SELECT * FROM t4 ORDER BY a, b;
+id	a	b
+1	10	x
+2	10	y
+3	20	x
+# Test 13: DESC columns in composite index
+CREATE TABLE t5 (
+a INT,
+b VARCHAR(10),
+c INT,
+KEY idx_desc (a ASC, b DESC, c ASC)
+) ENGINE=KVT;
+INSERT INTO t5 VALUES 
+(1, 'z', 10),
+(1, 'y', 20),
+(1, 'x', 30),
+(2, 'z', 40),
+(2, 'y', 50);
+SELECT * FROM t5 WHERE a = 1 ORDER BY b DESC, c ASC;
+a	b	c
+1	z	10
+1	y	20
+1	x	30
+# Test 14: Cleanup
+DROP TABLE t1, t2, t3, t4, t5;

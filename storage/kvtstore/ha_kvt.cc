@@ -29,6 +29,7 @@
 #include "kvt_fulltext_adapter.h"
 #include "kvt_spatial_adapter.h"
 #include "kvt_statistics.h"
+#include "kvt_composite_index.h"
 
 // Key algorithm and flag definitions for indexes
 #ifndef HA_SPATIAL_INDEX
@@ -617,6 +618,31 @@ int ha_kvt::write_row(const uchar *buf)
     }
   }
   
+  // Write composite index entries for all non-special indexes
+  for (uint i = 0; i < table->s->keys; i++) {
+    KEY *key_info = &table->key_info[i];
+    
+    // Skip special index types (handled separately)
+    if (key_info->algorithm == HA_KEY_ALG_FULLTEXT ||
+        (key_info->flags & HA_SPATIAL_INDEX)) {
+      continue;
+    }
+    
+    // Build composite index key
+    uint64_t row_id = next_rowid - 1;  // We already incremented it
+    std::string index_key = kvt_composite::build_composite_key_from_record(
+        kvt_data_table_id, i, key_info, buf, row_id);
+    
+    // Store index entry (key -> row_id)
+    std::string index_value = std::to_string(row_id);
+    KVTError idx_err = kvt_set(kvt_tx_id, kvt_data_table_id, 
+                               index_key, index_value, error_msg);
+    if (idx_err != KVTError::SUCCESS) {
+      // TODO: Should we rollback the data row write here?
+      DBUG_RETURN(map_kvt_error_to_mysql(idx_err, error_msg));
+    }
+  }
+  
   // Update auto-increment tracking if needed
   if (table->found_next_number_field && 
       table->next_number_field->val_int() > 0) {
@@ -663,6 +689,38 @@ int ha_kvt::update_row(const uchar *old_data, const uchar *new_data)
   
   std::string error_msg;
   
+  // Extract row_id from current position key (assuming it's encoded in the key)
+  // For now, use a simple counter-based approach
+  // TODO: Extract actual row_id from the key
+  uint64_t row_id = stats.records;  // Approximate row_id
+  
+  // Update composite indexes
+  for (uint i = 0; i < table->s->keys; i++) {
+    KEY *key_info = &table->key_info[i];
+    
+    // Skip special index types
+    if (key_info->algorithm == HA_KEY_ALG_FULLTEXT ||
+        (key_info->flags & HA_SPATIAL_INDEX)) {
+      continue;
+    }
+    
+    // Delete old index entry
+    std::string old_index_key = kvt_composite::build_composite_key_from_record(
+        kvt_data_table_id, i, key_info, old_data, row_id);
+    KVTError del_err = kvt_del(kvt_tx_id, kvt_data_table_id, old_index_key, error_msg);
+    // Ignore KEY_NOT_FOUND errors for index deletion
+    
+    // Insert new index entry
+    std::string new_index_key = kvt_composite::build_composite_key_from_record(
+        kvt_data_table_id, i, key_info, new_data, row_id);
+    std::string index_value = std::to_string(row_id);
+    KVTError ins_err = kvt_set(kvt_tx_id, kvt_data_table_id, 
+                               new_index_key, index_value, error_msg);
+    if (ins_err != KVTError::SUCCESS) {
+      DBUG_RETURN(map_kvt_error_to_mysql(ins_err, error_msg));
+    }
+  }
+  
   if (new_data_key != current_position_key) {
     // Primary key changed - delete old, insert new
     KVTError err = kvt_del(kvt_tx_id, kvt_data_table_id, current_position_key, error_msg);
@@ -706,6 +764,27 @@ int ha_kvt::delete_row(const uchar *buf)
   // Use stored position key
   if (current_position_key.empty()) {
     DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  // Extract row_id (approximate for now)
+  uint64_t row_id = stats.records;
+  
+  // Delete composite index entries
+  for (uint i = 0; i < table->s->keys; i++) {
+    KEY *key_info = &table->key_info[i];
+    
+    // Skip special index types
+    if (key_info->algorithm == HA_KEY_ALG_FULLTEXT ||
+        (key_info->flags & HA_SPATIAL_INDEX)) {
+      continue;
+    }
+    
+    // Delete index entry
+    std::string index_key = kvt_composite::build_composite_key_from_record(
+        kvt_data_table_id, i, key_info, buf, row_id);
+    std::string error_msg;
+    kvt_del(kvt_tx_id, kvt_data_table_id, index_key, error_msg);
+    // Ignore errors for index deletion
   }
   
   // Delete from KVT
@@ -874,57 +953,168 @@ int ha_kvt::index_read_map(uchar *buf, const uchar *key,
 {
   DBUG_ENTER("ha_kvt::index_read_map");
   
-  // For now, fall back to table scan for index operations
-  // This provides basic functionality while we implement full index support
-  
-  // Start a table scan
-  int ret = rnd_init(true);
-  if (ret != 0) {
-    DBUG_RETURN(ret);
+  if (active_index >= table->s->keys) {
+    DBUG_RETURN(HA_ERR_WRONG_INDEX);
   }
   
-  // Scan for matching row
-  while ((ret = rnd_next(buf)) == 0) {
-    // Check if this row matches the key
-    // For primary key, compare the key fields
-    bool matches = true;
-    
-    if (active_index < table->s->keys) {
-      KEY *key_info = &table->key_info[active_index];
-      const uchar *key_ptr = key;
+  KEY *key_info = &table->key_info[active_index];
+  
+  // Handle special index types differently
+  if (key_info->algorithm == HA_KEY_ALG_FULLTEXT) {
+    // Fulltext search is handled through ft_read
+    DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  }
+  
+  if (key_info->flags & HA_SPATIAL_INDEX) {
+    // Spatial search needs special handling
+    DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  }
+  
+  // Build composite index key for search
+  std::string search_key = kvt_composite::build_composite_index_key(
+      kvt_data_table_id, active_index, key_info, key, keypart_map, 0);
+  
+  // Determine scan range based on find_flag
+  std::string start_key, end_key;
+  std::string error_msg;
+  
+  switch (find_flag) {
+    case HA_READ_KEY_EXACT:
+      // Exact match on provided columns
+      start_key = search_key;
+      // Add max row_id to get all rows with this key
+      end_key = search_key;
+      end_key.append(8, 0xFF);
+      break;
       
-      for (uint i = 0; i < key_info->user_defined_key_parts && matches; i++) {
-        if (keypart_map & (1 << i)) {
-          Field *field = key_info->key_part[i].field;
-          uint key_part_length = key_info->key_part[i].length;
-          
-          // Compare field value with key
-          if (field->key_cmp(key_ptr, field->offset(table->record[0])) != 0) {
-            matches = false;
-          }
-          key_ptr += key_part_length;
-        }
-      }
-    }
-    
-    if (matches) {
-      rnd_end();
-      DBUG_RETURN(0);
-    }
+    case HA_READ_KEY_OR_NEXT:
+    case HA_READ_AFTER_KEY:
+      // Greater than or equal
+      start_key = search_key;
+      // Scan to end of this index
+      end_key = kvt_composite::create_composite_range_end_key(search_key);
+      break;
+      
+    case HA_READ_PREFIX:
+    case HA_READ_PREFIX_LAST:
+      // Prefix match (for partial keys)
+      start_key = search_key;
+      end_key = kvt_composite::create_composite_range_end_key(search_key);
+      break;
+      
+    default:
+      // For other cases, do a table scan fallback
+      DBUG_RETURN(HA_ERR_UNSUPPORTED);
   }
   
-  rnd_end();
-  DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  // Clear previous scan results
+  index_scan_results.clear();
+  index_scan_position = 0;
+  
+  // Perform the scan
+  KVTError err = kvt_scan(kvt_tx_id, kvt_data_table_id, 
+                          start_key, end_key,
+                          100, index_scan_results, error_msg);
+  
+  if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
+    DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+  }
+  
+  // Process first result
+  if (index_scan_results.empty()) {
+    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  }
+  
+  // Get the row_id from the index value
+  uint64_t row_id = std::stoull(index_scan_results[0].value);
+  
+  // Fetch the actual row data
+  std::string row_key = row_codec->encode_rowid(row_id);
+  std::string data_key = generate_data_key(row_key);
+  std::string row_value;
+  
+  err = kvt_get(kvt_tx_id, kvt_data_table_id, data_key, row_value, error_msg);
+  if (err != KVTError::SUCCESS) {
+    if (err == KVTError::KEY_NOT_FOUND) {
+      // Row was deleted, try next
+      index_scan_position++;
+      DBUG_RETURN(index_next(buf));
+    }
+    DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+  }
+  
+  // Decode row
+  int ret = decode_row(row_value, buf);
+  if (ret == 0) {
+    current_position_key = data_key;
+    index_scan_position++;
+  }
+  
+  DBUG_RETURN(ret);
 }
 
 int ha_kvt::index_next(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::index_next");
   
-  // For now, continue table scan
-  int ret = rnd_next(buf);
+  // Continue with index scan results
+  while (index_scan_position < index_scan_results.size()) {
+    // Get the row_id from the index value
+    uint64_t row_id = std::stoull(index_scan_results[index_scan_position].value);
+    
+    // Fetch the actual row data
+    std::string row_key = row_codec->encode_rowid(row_id);
+    std::string data_key = generate_data_key(row_key);
+    std::string row_value;
+    std::string error_msg;
+    
+    KVTError err = kvt_get(kvt_tx_id, kvt_data_table_id, data_key, row_value, error_msg);
+    if (err == KVTError::KEY_NOT_FOUND) {
+      // Row was deleted, try next
+      index_scan_position++;
+      continue;
+    } else if (err != KVTError::SUCCESS) {
+      DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+    }
+    
+    // Decode row
+    int ret = decode_row(row_value, buf);
+    if (ret == 0) {
+      current_position_key = data_key;
+      index_scan_position++;
+      DBUG_RETURN(0);
+    }
+    DBUG_RETURN(ret);
+  }
   
-  DBUG_RETURN(ret);
+  // Need to fetch more results
+  if (index_scan_results.size() == 100) {  // We fetched a full batch
+    // Get the last key to continue from
+    std::string last_key = index_scan_results.back().key;
+    std::string end_key = kvt_composite::create_composite_range_end_key(last_key);
+    
+    index_scan_results.clear();
+    index_scan_position = 0;
+    
+    std::string error_msg;
+    KVTError err = kvt_scan(kvt_tx_id, kvt_data_table_id,
+                            last_key, end_key,
+                            100, index_scan_results, error_msg);
+    
+    if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
+      DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+    }
+    
+    if (!index_scan_results.empty()) {
+      // Skip the first one as it's the same as the last one we processed
+      if (index_scan_results[0].key == last_key) {
+        index_scan_position = 1;
+      }
+      DBUG_RETURN(index_next(buf));  // Recursive call to process new batch
+    }
+  }
+  
+  DBUG_RETURN(HA_ERR_END_OF_FILE);
 }
 
 int ha_kvt::index_prev(uchar *buf)
