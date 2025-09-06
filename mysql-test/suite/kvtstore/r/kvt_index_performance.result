@@ -1,0 +1,145 @@
+#
+# Test index performance compared to table scans
+#
+# Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_perf;
+USE test_kvt_perf;
+#
+# Test 1: Create a larger table for performance testing
+#
+CREATE TABLE perf_test (
+id INT PRIMARY KEY,
+category VARCHAR(20),
+value INT,
+description TEXT
+) ENGINE=KVT;
+# Insert 100 rows
+# Count rows to verify
+SELECT COUNT(*) FROM perf_test;
+COUNT(*)
+100
+#
+# Test 2: Primary key lookups (should be fast)
+#
+SELECT * FROM perf_test WHERE id = 1;
+id	category	value	description
+1	cat1	10	Description for row 1
+SELECT * FROM perf_test WHERE id = 50;
+id	category	value	description
+50	cat0	500	Description for row 50
+SELECT * FROM perf_test WHERE id = 100;
+id	category	value	description
+100	cat0	1000	Description for row 100
+# Multiple key lookups
+SELECT * FROM perf_test WHERE id IN (10, 20, 30, 40, 50);
+id	category	value	description
+10	cat0	100	Description for row 10
+20	cat0	200	Description for row 20
+30	cat0	300	Description for row 30
+40	cat0	400	Description for row 40
+50	cat0	500	Description for row 50
+#
+# Test 3: Range queries on primary key
+#
+SELECT COUNT(*) FROM perf_test WHERE id BETWEEN 20 AND 30;
+COUNT(*)
+11
+SELECT COUNT(*) FROM perf_test WHERE id >= 90;
+COUNT(*)
+11
+SELECT COUNT(*) FROM perf_test WHERE id <= 10;
+COUNT(*)
+10
+#
+# Test 4: Full table scan (no index usage)
+#
+SELECT COUNT(*) FROM perf_test WHERE value > 500;
+COUNT(*)
+50
+SELECT COUNT(*) FROM perf_test WHERE category = 'cat5';
+COUNT(*)
+10
+#
+# Test 5: ORDER BY primary key (should use index)
+#
+SELECT id, category FROM perf_test ORDER BY id LIMIT 5;
+id	category
+1	cat1
+2	cat2
+3	cat3
+4	cat4
+5	cat5
+SELECT id, category FROM perf_test ORDER BY id DESC LIMIT 5;
+id	category
+100	cat0
+99	cat9
+98	cat8
+97	cat7
+96	cat6
+#
+# Test 6: Test with a larger dataset
+#
+CREATE TABLE large_test (
+id INT PRIMARY KEY,
+data1 VARCHAR(100),
+data2 INT,
+data3 DECIMAL(10,2)
+) ENGINE=KVT;
+# Insert 1000 rows using bulk insert
+SELECT COUNT(*) FROM large_test;
+COUNT(*)
+1000
+# Test point queries on large table
+SELECT * FROM large_test WHERE id = 500;
+id	data1	data2	data3
+500	data_500	50000	1570.00
+SELECT * FROM large_test WHERE id = 999;
+id	data1	data2	data3
+999	data_999	99900	3136.86
+# Test range queries on large table
+SELECT COUNT(*) FROM large_test WHERE id BETWEEN 400 AND 600;
+COUNT(*)
+201
+SELECT COUNT(*) FROM large_test WHERE id > 900;
+COUNT(*)
+100
+#
+# Test 7: Join performance with primary keys
+#
+CREATE TABLE orders (
+order_id INT PRIMARY KEY,
+customer_id INT,
+amount DECIMAL(10,2)
+) ENGINE=KVT;
+CREATE TABLE customers (
+customer_id INT PRIMARY KEY,
+name VARCHAR(50),
+city VARCHAR(50)
+) ENGINE=KVT;
+# Join using primary keys
+SELECT o.order_id, c.name, o.amount
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+WHERE o.order_id IN (101, 105, 110);
+order_id	name	amount
+101	Alice	100.00
+105	Bob	250.00
+110	Eve	550.00
+# Aggregate with join
+SELECT c.name, COUNT(o.order_id) as order_count, SUM(o.amount) as total_amount
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.customer_id, c.name
+ORDER BY c.customer_id;
+name	order_count	total_amount
+Alice	3	425.00
+Bob	2	450.00
+Charlie	2	625.00
+David	1	400.00
+Eve	2	1050.00
+# Cleanup
+DROP TABLE orders;
+DROP TABLE customers;
+DROP TABLE perf_test;
+DROP TABLE large_test;
+DROP DATABASE test_kvt_perf;

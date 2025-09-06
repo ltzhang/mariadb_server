@@ -1,0 +1,227 @@
+#
+# Test primary key index functionality
+#
+# Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_index;
+USE test_kvt_index;
+#
+# Test 1: Primary key point queries
+#
+CREATE TABLE t1 (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+value INT
+) ENGINE=KVT;
+INSERT INTO t1 VALUES (1, 'Alice', 100);
+INSERT INTO t1 VALUES (2, 'Bob', 200);
+INSERT INTO t1 VALUES (3, 'Charlie', 300);
+INSERT INTO t1 VALUES (4, 'David', 400);
+INSERT INTO t1 VALUES (5, 'Eve', 500);
+# Point query on primary key
+SELECT * FROM t1 WHERE id = 3;
+id	name	value
+3	Charlie	300
+SELECT * FROM t1 WHERE id = 1;
+id	name	value
+1	Alice	100
+SELECT * FROM t1 WHERE id = 5;
+id	name	value
+5	Eve	500
+# Non-existent key
+SELECT * FROM t1 WHERE id = 10;
+id	name	value
+DROP TABLE t1;
+#
+# Test 2: Composite primary keys
+#
+CREATE TABLE t2 (
+dept_id INT,
+emp_id INT,
+name VARCHAR(50),
+salary DECIMAL(10,2),
+PRIMARY KEY (dept_id, emp_id)
+) ENGINE=KVT;
+INSERT INTO t2 VALUES (1, 101, 'John', 50000.00);
+INSERT INTO t2 VALUES (1, 102, 'Jane', 55000.00);
+INSERT INTO t2 VALUES (2, 201, 'Mike', 60000.00);
+INSERT INTO t2 VALUES (2, 202, 'Sarah', 65000.00);
+INSERT INTO t2 VALUES (3, 301, 'Tom', 70000.00);
+# Query on full composite key
+SELECT * FROM t2 WHERE dept_id = 1 AND emp_id = 102;
+dept_id	emp_id	name	salary
+1	102	Jane	55000.00
+SELECT * FROM t2 WHERE dept_id = 2 AND emp_id = 201;
+dept_id	emp_id	name	salary
+2	201	Mike	60000.00
+# Query on partial key (should use table scan)
+SELECT * FROM t2 WHERE dept_id = 1;
+dept_id	emp_id	name	salary
+1	101	John	50000.00
+1	102	Jane	55000.00
+SELECT * FROM t2 WHERE emp_id = 201;
+dept_id	emp_id	name	salary
+2	201	Mike	60000.00
+DROP TABLE t2;
+#
+# Test 3: Primary key range scans
+#
+CREATE TABLE t3 (
+id INT PRIMARY KEY,
+data VARCHAR(100)
+) ENGINE=KVT;
+INSERT INTO t3 VALUES (1, 'One');
+INSERT INTO t3 VALUES (5, 'Five');
+INSERT INTO t3 VALUES (10, 'Ten');
+INSERT INTO t3 VALUES (15, 'Fifteen');
+INSERT INTO t3 VALUES (20, 'Twenty');
+INSERT INTO t3 VALUES (25, 'Twenty-five');
+# Range queries
+SELECT * FROM t3 WHERE id >= 10 AND id <= 20;
+id	data
+10	Ten
+15	Fifteen
+20	Twenty
+SELECT * FROM t3 WHERE id > 5 AND id < 25;
+id	data
+10	Ten
+15	Fifteen
+20	Twenty
+SELECT * FROM t3 WHERE id BETWEEN 1 AND 15;
+id	data
+1	One
+5	Five
+10	Ten
+15	Fifteen
+DROP TABLE t3;
+#
+# Test 4: Primary key with ORDER BY
+#
+CREATE TABLE t4 (
+id INT PRIMARY KEY,
+name VARCHAR(50)
+) ENGINE=KVT;
+INSERT INTO t4 VALUES (3, 'Three');
+INSERT INTO t4 VALUES (1, 'One');
+INSERT INTO t4 VALUES (4, 'Four');
+INSERT INTO t4 VALUES (2, 'Two');
+INSERT INTO t4 VALUES (5, 'Five');
+# ORDER BY primary key
+SELECT * FROM t4 ORDER BY id;
+id	name
+1	One
+2	Two
+3	Three
+4	Four
+5	Five
+SELECT * FROM t4 ORDER BY id DESC;
+id	name
+5	Five
+4	Four
+3	Three
+2	Two
+1	One
+# ORDER BY with LIMIT
+SELECT * FROM t4 ORDER BY id LIMIT 3;
+id	name
+1	One
+2	Two
+3	Three
+SELECT * FROM t4 ORDER BY id DESC LIMIT 2;
+id	name
+5	Five
+4	Four
+DROP TABLE t4;
+#
+# Test 5: Primary key updates
+#
+CREATE TABLE t5 (
+id INT PRIMARY KEY,
+status VARCHAR(20),
+count INT
+) ENGINE=KVT;
+INSERT INTO t5 VALUES (1, 'active', 10);
+INSERT INTO t5 VALUES (2, 'inactive', 20);
+INSERT INTO t5 VALUES (3, 'pending', 30);
+# Update using primary key
+UPDATE t5 SET status = 'completed' WHERE id = 3;
+SELECT * FROM t5 WHERE id = 3;
+id	status	count
+3	completed	30
+UPDATE t5 SET count = count + 5 WHERE id = 1;
+SELECT * FROM t5 WHERE id = 1;
+id	status	count
+1	active	15
+# Delete using primary key
+DELETE FROM t5 WHERE id = 2;
+SELECT * FROM t5;
+id	status	count
+1	active	15
+3	completed	30
+DROP TABLE t5;
+#
+# Test 6: Primary key with NULL (should fail)
+#
+CREATE TABLE t6 (
+id INT PRIMARY KEY,
+data VARCHAR(50)
+) ENGINE=KVT;
+INSERT INTO t6 VALUES (NULL, 'null_id');
+ERROR 23000: Column 'id' cannot be null
+INSERT INTO t6 VALUES (1, 'valid');
+SELECT * FROM t6;
+id	data
+1	valid
+DROP TABLE t6;
+#
+# Test 7: Auto-increment primary key
+#
+CREATE TABLE t7 (
+id INT PRIMARY KEY AUTO_INCREMENT,
+name VARCHAR(50)
+) ENGINE=KVT;
+INSERT INTO t7 (name) VALUES ('Auto1');
+INSERT INTO t7 (name) VALUES ('Auto2');
+INSERT INTO t7 (name) VALUES ('Auto3');
+SELECT * FROM t7 ORDER BY id;
+id	name
+1	Auto1
+2	Auto2
+3	Auto3
+# Explicit value insert
+INSERT INTO t7 VALUES (10, 'Explicit10');
+INSERT INTO t7 (name) VALUES ('Auto4');
+SELECT * FROM t7 ORDER BY id;
+id	name
+1	Auto1
+2	Auto2
+3	Auto3
+10	Explicit10
+11	Auto4
+DROP TABLE t7;
+#
+# Test 8: Primary key with transactions
+#
+CREATE TABLE t8 (
+id INT PRIMARY KEY,
+value INT
+) ENGINE=KVT;
+BEGIN;
+INSERT INTO t8 VALUES (1, 100);
+INSERT INTO t8 VALUES (2, 200);
+SELECT * FROM t8 WHERE id = 1;
+id	value
+1	100
+COMMIT;
+BEGIN;
+INSERT INTO t8 VALUES (3, 300);
+SELECT * FROM t8 WHERE id = 3;
+id	value
+3	300
+ROLLBACK;
+SELECT * FROM t8 ORDER BY id;
+id	value
+1	100
+2	200
+DROP TABLE t8;
+# Cleanup
+DROP DATABASE test_kvt_index;

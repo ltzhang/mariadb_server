@@ -1,0 +1,177 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test index performance compared to table scans
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_perf;
+USE test_kvt_perf;
+
+--echo #
+--echo # Test 1: Create a larger table for performance testing
+--echo #
+CREATE TABLE perf_test (
+  id INT PRIMARY KEY,
+  category VARCHAR(20),
+  value INT,
+  description TEXT
+) ENGINE=KVT;
+
+--echo # Insert 100 rows
+--disable_query_log
+DELIMITER //
+CREATE PROCEDURE insert_test_data()
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  WHILE i <= 100 DO
+    INSERT INTO perf_test VALUES (
+      i,
+      CONCAT('cat', (i % 10)),
+      i * 10,
+      CONCAT('Description for row ', i)
+    );
+    SET i = i + 1;
+  END WHILE;
+END//
+DELIMITER ;
+
+CALL insert_test_data();
+DROP PROCEDURE insert_test_data;
+--enable_query_log
+
+--echo # Count rows to verify
+SELECT COUNT(*) FROM perf_test;
+
+--echo #
+--echo # Test 2: Primary key lookups (should be fast)
+--echo #
+SELECT * FROM perf_test WHERE id = 1;
+SELECT * FROM perf_test WHERE id = 50;
+SELECT * FROM perf_test WHERE id = 100;
+
+--echo # Multiple key lookups
+SELECT * FROM perf_test WHERE id IN (10, 20, 30, 40, 50);
+
+--echo #
+--echo # Test 3: Range queries on primary key
+--echo #
+SELECT COUNT(*) FROM perf_test WHERE id BETWEEN 20 AND 30;
+SELECT COUNT(*) FROM perf_test WHERE id >= 90;
+SELECT COUNT(*) FROM perf_test WHERE id <= 10;
+
+--echo #
+--echo # Test 4: Full table scan (no index usage)
+--echo #
+SELECT COUNT(*) FROM perf_test WHERE value > 500;
+SELECT COUNT(*) FROM perf_test WHERE category = 'cat5';
+
+--echo #
+--echo # Test 5: ORDER BY primary key (should use index)
+--echo #
+SELECT id, category FROM perf_test ORDER BY id LIMIT 5;
+SELECT id, category FROM perf_test ORDER BY id DESC LIMIT 5;
+
+--echo #
+--echo # Test 6: Test with a larger dataset
+--echo #
+CREATE TABLE large_test (
+  id INT PRIMARY KEY,
+  data1 VARCHAR(100),
+  data2 INT,
+  data3 DECIMAL(10,2)
+) ENGINE=KVT;
+
+--echo # Insert 1000 rows using bulk insert
+--disable_query_log
+DELIMITER //
+CREATE PROCEDURE insert_large_data()
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  WHILE i <= 1000 DO
+    INSERT INTO large_test VALUES (
+      i,
+      CONCAT('data_', i),
+      i * 100,
+      i * 3.14
+    );
+    SET i = i + 1;
+  END WHILE;
+END//
+DELIMITER ;
+
+CALL insert_large_data();
+DROP PROCEDURE insert_large_data;
+--enable_query_log
+
+SELECT COUNT(*) FROM large_test;
+
+--echo # Test point queries on large table
+SELECT * FROM large_test WHERE id = 500;
+SELECT * FROM large_test WHERE id = 999;
+
+--echo # Test range queries on large table
+SELECT COUNT(*) FROM large_test WHERE id BETWEEN 400 AND 600;
+SELECT COUNT(*) FROM large_test WHERE id > 900;
+
+--echo #
+--echo # Test 7: Join performance with primary keys
+--echo #
+CREATE TABLE orders (
+  order_id INT PRIMARY KEY,
+  customer_id INT,
+  amount DECIMAL(10,2)
+) ENGINE=KVT;
+
+CREATE TABLE customers (
+  customer_id INT PRIMARY KEY,
+  name VARCHAR(50),
+  city VARCHAR(50)
+) ENGINE=KVT;
+
+--disable_query_log
+INSERT INTO customers VALUES 
+  (1, 'Alice', 'New York'),
+  (2, 'Bob', 'London'),
+  (3, 'Charlie', 'Paris'),
+  (4, 'David', 'Tokyo'),
+  (5, 'Eve', 'Sydney');
+
+INSERT INTO orders VALUES
+  (101, 1, 100.00),
+  (102, 2, 200.00),
+  (103, 1, 150.00),
+  (104, 3, 300.00),
+  (105, 2, 250.00),
+  (106, 4, 400.00),
+  (107, 5, 500.00),
+  (108, 1, 175.00),
+  (109, 3, 325.00),
+  (110, 5, 550.00);
+--enable_query_log
+
+--echo # Join using primary keys
+SELECT o.order_id, c.name, o.amount
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+WHERE o.order_id IN (101, 105, 110);
+
+--echo # Aggregate with join
+SELECT c.name, COUNT(o.order_id) as order_count, SUM(o.amount) as total_amount
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.customer_id, c.name
+ORDER BY c.customer_id;
+
+--echo # Cleanup
+DROP TABLE orders;
+DROP TABLE customers;
+DROP TABLE perf_test;
+DROP TABLE large_test;
+DROP DATABASE test_kvt_perf;

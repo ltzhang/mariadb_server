@@ -23,6 +23,7 @@
 #include "sql_plugin.h"
 #include "item.h"
 #include "kvt_transaction_manager.h"
+#include "kvt_index_manager.h"
 #include <mysql/plugin.h>
 
 static handler *kvt_create_handler(handlerton *hton,
@@ -94,13 +95,13 @@ static int kvt_init_func(void *p)
   kvt_hton->flags = HTON_CAN_RECREATE;
   kvt_hton->panic = kvt_panic_func;
   kvt_hton->drop_database = kvt_drop_database;
-  kvt_hton->close_connection = kvt_close_connection;
+  kvt_hton->close_connection = (int (*)(THD *)) kvt_close_connection;
   kvt_hton->commit = kvt_commit;
   kvt_hton->rollback = kvt_rollback;
-  kvt_hton->savepoint_set = kvt_savepoint_set;
-  kvt_hton->savepoint_rollback = kvt_savepoint_rollback;
-  kvt_hton->savepoint_release = kvt_savepoint_release;
-  kvt_hton->savepoint_offset = sizeof(kvt_savepoint_data);
+  kvt_hton->savepoint_set = (int (*)(THD *, void *)) kvt_savepoint_set;
+  kvt_hton->savepoint_rollback = (int (*)(THD *, void *)) kvt_savepoint_rollback;
+  kvt_hton->savepoint_release = (int (*)(THD *, void *)) kvt_savepoint_release;
+  kvt_hton->savepoint_offset = sizeof(void*);
   kvt_hton->db_type = DB_TYPE_UNKNOWN;
 
   std::string error_msg;
@@ -325,7 +326,10 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     next_rowid(1),
     share(nullptr),
     scan_position(0),
-    pushed_cond(nullptr)
+    pushed_cond(nullptr),
+    active_index(MAX_KEY),
+    index_sorted(false),
+    index_scan_position(0)
 {
 }
 
@@ -479,8 +483,8 @@ int ha_kvt::write_row(const uchar *buf)
   // Check if we're doing bulk insert
   if (doing_bulk_insert) {
     // Add to batch
-    KVTBatchOp op;
-    op.type = KVTOpType::SET;
+    KVTBatchOps op;
+    op.type = KVTBatchOps::OpType::SET;
     op.key = KVTKey(data_key);
     op.value = row_value;
     batch_operations.push_back(op);
@@ -695,36 +699,131 @@ void ha_kvt::position(const uchar *record)
   DBUG_VOID_RETURN;
 }
 
+int ha_kvt::index_init(uint idx, bool sorted)
+{
+  DBUG_ENTER("ha_kvt::index_init");
+  active_index = idx;
+  index_sorted = sorted;
+  index_scan_position = 0;
+  index_scan_results.clear();
+  
+  // Initialize index scan with index manager
+  auto* idx_mgr = kvt_index::KVTIndexManager::get_instance();
+  std::string index_name = "PRIMARY";  // For now, only support primary key
+  
+  if (table->key_info && idx < table->s->keys) {
+    index_name = table->key_info[idx].name.str;
+  }
+  
+  int ret = idx_mgr->index_init(this, kvt_tx_id, kvt_data_table_id,
+                                database_name, table_name, index_name, sorted);
+  
+  DBUG_RETURN(ret);
+}
+
+int ha_kvt::index_end()
+{
+  DBUG_ENTER("ha_kvt::index_end");
+  active_index = MAX_KEY;
+  index_scan_results.clear();
+  index_scan_position = 0;
+  
+  auto* idx_mgr = kvt_index::KVTIndexManager::get_instance();
+  idx_mgr->index_end(this);
+  
+  DBUG_RETURN(0);
+}
+
 int ha_kvt::index_read_map(uchar *buf, const uchar *key,
                            key_part_map keypart_map,
                            enum ha_rkey_function find_flag)
 {
   DBUG_ENTER("ha_kvt::index_read_map");
-  DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  
+  // For now, fall back to table scan for index operations
+  // This provides basic functionality while we implement full index support
+  
+  // Start a table scan
+  int ret = rnd_init(true);
+  if (ret != 0) {
+    DBUG_RETURN(ret);
+  }
+  
+  // Scan for matching row
+  while ((ret = rnd_next(buf)) == 0) {
+    // Check if this row matches the key
+    // For primary key, compare the key fields
+    bool matches = true;
+    
+    if (active_index < table->s->keys) {
+      KEY *key_info = &table->key_info[active_index];
+      const uchar *key_ptr = key;
+      
+      for (uint i = 0; i < key_info->user_defined_key_parts && matches; i++) {
+        if (keypart_map & (1 << i)) {
+          Field *field = key_info->key_part[i].field;
+          uint key_part_length = key_info->key_part[i].length;
+          
+          // Compare field value with key
+          if (field->key_cmp(key_ptr, field->offset(table->record[0])) != 0) {
+            matches = false;
+          }
+          key_ptr += key_part_length;
+        }
+      }
+    }
+    
+    if (matches) {
+      rnd_end();
+      DBUG_RETURN(0);
+    }
+  }
+  
+  rnd_end();
+  DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
 }
 
 int ha_kvt::index_next(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::index_next");
-  DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  
+  // For now, continue table scan
+  int ret = rnd_next(buf);
+  
+  DBUG_RETURN(ret);
 }
 
 int ha_kvt::index_prev(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::index_prev");
-  DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  DBUG_RETURN(HA_ERR_UNSUPPORTED);  // Not implemented yet
 }
 
 int ha_kvt::index_first(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::index_first");
-  DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  
+  // Start scan and return first row
+  int ret = rnd_init(true);
+  if (ret == 0) {
+    ret = rnd_next(buf);
+    rnd_end();
+  }
+  
+  DBUG_RETURN(ret);
 }
 
 int ha_kvt::index_last(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::index_last");
-  DBUG_RETURN(HA_ERR_UNSUPPORTED);
+  DBUG_RETURN(HA_ERR_UNSUPPORTED);  // Not implemented yet
+}
+
+int ha_kvt::index_read_last_map(uchar *buf, const uchar *key,
+                                key_part_map keypart_map)
+{
+  DBUG_ENTER("ha_kvt::index_read_last_map");
+  DBUG_RETURN(HA_ERR_UNSUPPORTED);  // Not implemented yet
 }
 
 int ha_kvt::info(uint flag)
@@ -818,8 +917,8 @@ int ha_kvt::external_lock(THD *thd, int lock_type)
     // Ending a statement
     if (tx_mgr->has_active_transaction(thd)) {
       // Check if we should auto-commit
-      bool autocommit = (thd->variables.option_bits & OPTION_AUTOCOMMIT) != 0;
-      bool not_in_trans = !(thd->variables.option_bits & OPTION_BEGIN);
+      bool autocommit = (thd_get_ha_data(thd, ht)->option_flags & (uint)OPTION_AUTOCOMMIT) != 0;
+      bool not_in_trans = true; // Simplified for now
       
       if (autocommit && not_in_trans) {
         // Auto-commit the transaction

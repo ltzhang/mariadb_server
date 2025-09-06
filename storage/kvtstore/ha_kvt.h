@@ -37,7 +37,7 @@ class ha_kvt: public handler
   bool is_delayed_insert;
   bool doing_bulk_insert;
   ha_rows bulk_insert_rows;
-  std::vector<KVTBatchOp> batch_operations;
+  std::vector<KVTBatchOps> batch_operations;
   
   // Table metadata
   std::string database_name;
@@ -109,6 +109,9 @@ public:
   int rnd_pos(uchar *buf, uchar *pos) override;
   void position(const uchar *record) override;
 
+  // Index operations
+  int index_init(uint idx, bool sorted) override;
+  int index_end() override;
   int index_read_map(uchar *buf, const uchar *key,
                      key_part_map keypart_map,
                      enum ha_rkey_function find_flag) override;
@@ -116,6 +119,8 @@ public:
   int index_prev(uchar *buf) override;
   int index_first(uchar *buf) override;
   int index_last(uchar *buf) override;
+  int index_read_last_map(uchar *buf, const uchar *key,
+                          key_part_map keypart_map) override;
 
   int info(uint) override;
   int extra(enum ha_extra_function operation) override;
@@ -171,6 +176,14 @@ private:
   // Pushed conditions
   const COND *pushed_cond;
   bool check_pushed_condition(const uchar *buf);
+  
+  // Index support
+  uint active_index;
+  bool index_sorted;
+  std::string index_scan_start_key;
+  std::string index_scan_end_key;
+  std::vector<std::pair<std::string, std::string>> index_scan_results;
+  size_t index_scan_position;
 };
 
 #endif

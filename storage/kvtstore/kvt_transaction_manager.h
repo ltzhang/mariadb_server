@@ -18,11 +18,14 @@
 #ifndef KVT_TRANSACTION_MANAGER_H
 #define KVT_TRANSACTION_MANAGER_H
 
+#include "my_global.h"
 #include <unordered_map>
 #include <mutex>
 #include <vector>
 #include "kvt/kvt_inc.h"
-#include "sql_class.h"
+
+// Forward declaration
+class THD;
 
 namespace kvt_transaction {
 

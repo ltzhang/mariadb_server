@@ -10,7 +10,9 @@ SET(KVT_SOURCES
     kvt_row_codec.cc
     kvt_row_codec.h
     kvt_transaction_manager.cc
-    kvt_transaction_manager.h)
+    kvt_transaction_manager.h
+    kvt_index_manager.cc
+    kvt_index_manager.h)
 
 # Include directories
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/sql

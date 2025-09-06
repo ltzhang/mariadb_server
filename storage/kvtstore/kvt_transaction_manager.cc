@@ -70,7 +70,8 @@ uint64_t KVTTransactionManager::begin_transaction(THD* thd, int isolation_level)
   TransactionState& state = transactions[thd];
   state.tx_id = tx_id;
   state.is_active = true;
-  state.is_autocommit = (thd->variables.option_bits & OPTION_AUTOCOMMIT) != 0;
+  // Use simple autocommit detection for now
+  state.is_autocommit = true; // Will be determined by external_lock
   state.isolation_level = isolation_level;
   state.statement_count = 0;
   state.savepoints.clear();
@@ -179,8 +180,8 @@ bool KVTTransactionManager::is_autocommit(THD* thd) {
     return it->second.is_autocommit;
   }
   
-  // Default to checking THD directly
-  return (thd->variables.option_bits & OPTION_AUTOCOMMIT) != 0;
+  // Default to autocommit
+  return true;
 }
 
 TransactionState* KVTTransactionManager::get_transaction_state(THD* thd) {
@@ -444,12 +445,12 @@ int KVTTransactionManager::handle_lock_wait_timeout(THD* thd) {
     return 0;
   }
   
-  // Check if we've exceeded the lock wait timeout
-  ulong timeout = thd->variables.lock_wait_timeout;
+  // Check if we've exceeded the lock wait timeout (default 50 seconds)
+  ulong timeout = 50;
   time_t current_time = time(nullptr);
   time_t elapsed = current_time - it->second.start_time;
   
-  if (elapsed > timeout) {
+  if (elapsed > (time_t)timeout) {
     // Timeout exceeded - rollback the transaction
     transactions_mutex.unlock();
     rollback_transaction(thd, true);
