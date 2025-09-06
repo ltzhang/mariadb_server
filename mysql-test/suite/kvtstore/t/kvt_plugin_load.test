@@ -1,0 +1,22 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Test KVT storage engine plugin loading
+--echo #
+
+--echo # Check if KVT plugin can be loaded
+INSTALL SONAME 'ha_kvt';
+
+--echo # Verify KVT is available
+SELECT * FROM INFORMATION_SCHEMA.ENGINES WHERE ENGINE='KVT';
+SHOW ENGINES LIKE 'KVT';
+
+--echo # Try to create a table with KVT engine (should fail gracefully in Phase 1)
+--error ER_CANT_CREATE_TABLE,ER_UNKNOWN_STORAGE_ENGINE
+CREATE TABLE t1 (id INT PRIMARY KEY, data VARCHAR(100)) ENGINE=KVT;
+
+--echo # Uninstall the plugin
+UNINSTALL SONAME 'ha_kvt';
+
+--echo # Verify KVT is no longer available
+SELECT * FROM INFORMATION_SCHEMA.ENGINES WHERE ENGINE='KVT';

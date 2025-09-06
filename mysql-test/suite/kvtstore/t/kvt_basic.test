@@ -1,0 +1,82 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Basic KVT storage engine tests - Phase 1
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo # Check KVT engine status
+SELECT ENGINE, SUPPORT, COMMENT FROM INFORMATION_SCHEMA.ENGINES WHERE ENGINE='KVT';
+
+--echo # Test CREATE TABLE with KVT engine
+CREATE TABLE kvt_test1 (
+  id INT NOT NULL PRIMARY KEY,
+  name VARCHAR(50),
+  value INT
+) ENGINE=KVT;
+
+--echo # Verify table was created
+SHOW CREATE TABLE kvt_test1;
+
+--echo # Test multiple table creation
+CREATE TABLE kvt_test2 (
+  key_col VARCHAR(100) PRIMARY KEY,
+  data TEXT
+) ENGINE=KVT;
+
+CREATE TABLE kvt_test3 (
+  id BIGINT PRIMARY KEY,
+  created_at TIMESTAMP,
+  status INT
+) ENGINE=KVT;
+
+--echo # List all KVT tables
+SELECT TABLE_NAME, ENGINE FROM INFORMATION_SCHEMA.TABLES 
+WHERE ENGINE='KVT' AND TABLE_SCHEMA=DATABASE() 
+ORDER BY TABLE_NAME;
+
+--echo # Test DROP TABLE
+DROP TABLE kvt_test1;
+DROP TABLE kvt_test2;
+
+--echo # Verify tables were dropped
+SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+WHERE ENGINE='KVT' AND TABLE_SCHEMA=DATABASE();
+
+--echo # Clean up
+DROP TABLE IF EXISTS kvt_test3;
+
+--echo # Test duplicate table creation
+CREATE TABLE kvt_dup (id INT PRIMARY KEY) ENGINE=KVT;
+--error ER_TABLE_EXISTS_ERROR
+CREATE TABLE kvt_dup (id INT PRIMARY KEY) ENGINE=KVT;
+DROP TABLE kvt_dup;
+
+--echo # Test table with various column types
+CREATE TABLE kvt_types (
+  id INT PRIMARY KEY,
+  tiny_col TINYINT,
+  small_col SMALLINT,
+  medium_col MEDIUMINT,
+  big_col BIGINT,
+  float_col FLOAT,
+  double_col DOUBLE,
+  decimal_col DECIMAL(10,2),
+  char_col CHAR(10),
+  varchar_col VARCHAR(255),
+  text_col TEXT,
+  date_col DATE,
+  time_col TIME,
+  datetime_col DATETIME,
+  timestamp_col TIMESTAMP,
+  bool_col BOOLEAN
+) ENGINE=KVT;
+
+SHOW CREATE TABLE kvt_types;
+DROP TABLE kvt_types;
+
+--echo # Done with Phase 1 basic tests
