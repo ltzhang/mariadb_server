@@ -20,7 +20,9 @@ SET(KVT_SOURCES
     kvt_fulltext_adapter.cc
     kvt_fulltext_adapter.h
     kvt_spatial_adapter.cc
-    kvt_spatial_adapter.h)
+    kvt_spatial_adapter.h
+    kvt_statistics.cc
+    kvt_statistics.h)
 
 # Include directories
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/sql

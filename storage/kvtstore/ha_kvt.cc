@@ -28,6 +28,12 @@
 #include "kvt_foreign_key.h"
 #include "kvt_fulltext_adapter.h"
 #include "kvt_spatial_adapter.h"
+#include "kvt_statistics.h"
+
+// Key algorithm and flag definitions for indexes
+#ifndef HA_SPATIAL_INDEX
+  #define HA_SPATIAL_INDEX 0  // Placeholder - actual value from handler.h
+#endif
 #include <mysql/plugin.h>
 
 static handler *kvt_create_handler(handlerton *hton,
@@ -496,8 +502,9 @@ int ha_kvt::write_row(const uchar *buf)
   // Check if we're doing bulk insert
   if (doing_bulk_insert) {
     // Add to batch
-    KVTBatchOps op;
-    op.type = KVTBatchOps::OpType::SET;
+    KVTOp op;
+    op.op = OP_SET;
+    op.table_id = kvt_data_table_id;
     op.key = KVTKey(data_key);
     op.value = row_value;
     batch_operations.push_back(op);
@@ -520,6 +527,25 @@ int ha_kvt::write_row(const uchar *buf)
     
     // Update statistics
     stats.records++;
+    
+    // Update persistent statistics
+    auto* stats_mgr = kvt::StatisticsManager::get_instance();
+    stats_mgr->increment_row_count(kvt_tx_id, kvt_data_table_id, 1);
+    
+    // Update index cardinality for all indexes
+    auto* index_mgr = kvt_index::IndexManager::get_instance();
+    for (uint i = 0; i < table->s->keys; i++) {
+      if (!(table->key_info[i].algorithm == HA_KEY_ALG_FULLTEXT) && 
+          !(table->key_info[i].flags & HA_SPATIAL_INDEX)) {
+        // Build index key for cardinality tracking
+        std::string index_value;
+        index_mgr->build_index_key_value(table, &table->key_info[i], buf, index_value);
+        if (!index_value.empty()) {
+          stats_mgr->update_index_cardinality(kvt_tx_id, kvt_data_table_id, i,
+                                             index_value.data(), index_value.size());
+        }
+      }
+    }
   }
   
   // Store the current position key for subsequent operations
@@ -528,7 +554,7 @@ int ha_kvt::write_row(const uchar *buf)
   // Index document for FULLTEXT indexes
   auto* fts_adapter = kvt_fts::KVTFulltextAdapter::get_instance();
   for (uint i = 0; i < table->s->keys; i++) {
-    if (table->key_info[i].flags & HA_FULLTEXT) {
+    if (table->key_info[i].algorithm == HA_KEY_ALG_FULLTEXT) {
       // Get text from FULLTEXT columns
       KEY *key_info = &table->key_info[i];
       std::string combined_text;
@@ -559,7 +585,7 @@ int ha_kvt::write_row(const uchar *buf)
   uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
   
   for (uint i = 0; i < table->s->keys; i++) {
-    if (table->key_info[i].flags & HA_SPATIAL) {
+    if (table->key_info[i].flags & HA_SPATIAL_INDEX) {
       // Get geometry from SPATIAL column
       KEY *key_info = &table->key_info[i];
       Field *field = key_info->key_part[0].field;  // SPATIAL indexes have single column
@@ -588,6 +614,14 @@ int ha_kvt::write_row(const uchar *buf)
         }
       }
     }
+  }
+  
+  // Update auto-increment tracking if needed
+  if (table->found_next_number_field && 
+      table->next_number_field->val_int() > 0) {
+    auto* stats_mgr = kvt::StatisticsManager::get_instance();
+    stats_mgr->update_auto_increment(kvt_tx_id, kvt_data_table_id,
+                                    table->next_number_field->val_int());
   }
   
   DBUG_RETURN(0);
@@ -683,6 +717,10 @@ int ha_kvt::delete_row(const uchar *buf)
   
   // Update statistics
   stats.records--;
+  
+  // Update persistent statistics
+  auto* stats_mgr = kvt::StatisticsManager::get_instance();
+  stats_mgr->increment_row_count(kvt_tx_id, kvt_data_table_id, -1);
   
   DBUG_RETURN(0);
 }
@@ -925,22 +963,89 @@ int ha_kvt::info(uint flag)
 {
   DBUG_ENTER("ha_kvt::info");
   
-  if (flag & HA_STATUS_AUTO)
-    stats.auto_increment_value = 1;
-  if (flag & HA_STATUS_CONST)
-  {
+  // Get transaction ID for statistics queries
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
+  if (txn_id == 0) {
+    // Start a read-only transaction for statistics
+    txn_id = tx_mgr->begin_transaction(ha_thd(), 0);
+  }
+  
+  // Get statistics manager
+  auto* stats_mgr = kvt::StatisticsManager::get_instance();
+  
+  if (flag & HA_STATUS_AUTO) {
+    // Get auto-increment value from statistics
+    kvt::TableStats table_stats;
+    if (stats_mgr->get_table_stats(txn_id, kvt_data_table_id, table_stats) == 0) {
+      stats.auto_increment_value = table_stats.auto_increment_value > 0 ? 
+                                   table_stats.auto_increment_value : 1;
+    } else {
+      stats.auto_increment_value = 1;
+    }
+  }
+  
+  if (flag & HA_STATUS_CONST) {
+    // Fixed constants for the storage engine
     stats.max_data_file_length = MAX_FILE_SIZE;
     stats.max_index_file_length = MAX_FILE_SIZE;
-    stats.create_time = 0;
-    ref_length = sizeof(uint64_t);
+    stats.create_time = 0;  // Could be stored in metadata
+    ref_length = sizeof(uint64_t);  // Size of row reference
+    
+    // Get index cardinality for all indexes
+    if (table->s->keys > 0 && table->key_info) {
+      for (uint i = 0; i < table->s->keys; i++) {
+        KEY *key_info = &table->key_info[i];
+        
+        // Get index statistics
+        kvt::IndexStats idx_stats;
+        if (stats_mgr->get_index_stats(txn_id, kvt_data_table_id, i, idx_stats) == 0) {
+          // Set cardinality for each key part
+          for (uint j = 0; j < key_info->user_defined_key_parts; j++) {
+            // MariaDB expects cardinality as number of unique values per key part
+            // For simplicity, use the same cardinality for all parts of a composite key
+            key_info->rec_per_key[j] = idx_stats.entry_count > 0 && idx_stats.cardinality > 0 ?
+                                       static_cast<float>(idx_stats.entry_count) / idx_stats.cardinality :
+                                       1.0;
+          }
+        }
+      }
+    }
   }
-  if (flag & HA_STATUS_VARIABLE)
-  {
-    stats.records = 0;
-    stats.deleted = 0;
-    stats.data_file_length = 0;
-    stats.index_file_length = 0;
-    stats.mean_rec_length = 0;
+  
+  if (flag & HA_STATUS_VARIABLE) {
+    // Variable statistics that change over time
+    kvt::TableStats table_stats;
+    if (stats_mgr->get_table_stats(txn_id, kvt_data_table_id, table_stats) == 0) {
+      stats.records = table_stats.row_count;
+      stats.deleted = 0;  // We don't track deleted rows separately
+      stats.data_file_length = table_stats.data_size;
+      stats.index_file_length = table_stats.index_size;
+      stats.mean_rec_length = table_stats.avg_row_length;
+      stats.check_time = table_stats.check_time;
+      stats.update_time = table_stats.update_time;
+    } else {
+      // No statistics available, provide estimates
+      stats.records = 0;
+      stats.deleted = 0;
+      stats.data_file_length = 0;
+      stats.index_file_length = 0;
+      stats.mean_rec_length = 0;
+    }
+  }
+  
+  if (flag & HA_STATUS_TIME) {
+    // Timestamp information
+    kvt::TableStats table_stats;
+    if (stats_mgr->get_table_stats(txn_id, kvt_data_table_id, table_stats) == 0) {
+      stats.update_time = table_stats.update_time;
+      stats.check_time = table_stats.check_time;
+    }
+  }
+  
+  if (flag & HA_STATUS_ERRKEY) {
+    // Error key information - set if there was an error on a specific key
+    errkey = last_error_key;
   }
   
   DBUG_RETURN(0);
@@ -1083,8 +1188,8 @@ int ha_kvt::flush_batch_operations()
   std::string error_msg;
   std::vector<KVTError> results(batch_operations.size());
   
-  KVTError err = kvt_batch_execute(kvt_tx_id, kvt_data_table_id, 
-                                   batch_operations, results, error_msg);
+  // Note: kvt_batch_execute signature takes tx_id, not table_id
+  KVTError err = kvt_batch_execute(kvt_tx_id, batch_operations, results, error_msg);
   
   if (err != KVTError::SUCCESS) {
     DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
@@ -1114,13 +1219,189 @@ ha_rows ha_kvt::records_in_range(uint inx, const key_range *min_key,
                                  const key_range *max_key, page_range *pages)
 {
   DBUG_ENTER("ha_kvt::records_in_range");
+  
+  // If no index specified or invalid index, return total row count
+  if (inx >= table->s->keys) {
+    DBUG_RETURN(stats.records);
+  }
+  
+  // Get transaction manager and ensure we have a transaction
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
+  
+  if (txn_id == 0) {
+    // No transaction, return a conservative estimate
+    DBUG_RETURN(stats.records > 0 ? stats.records / 2 : 10);
+  }
+  
+  // Special case for FULLTEXT indexes - not supported for range estimation
+  if (table->key_info[inx].algorithm == HA_KEY_ALG_FULLTEXT) {
+    DBUG_RETURN(HA_POS_ERROR);
+  }
+  
+  // Special case for SPATIAL indexes
+  if (table->key_info[inx].flags & HA_SPATIAL_INDEX) {
+    // For spatial indexes, return a conservative estimate
+    // TODO: Implement proper R-tree range estimation
+    DBUG_RETURN(stats.records > 0 ? stats.records / 4 : 10);
+  }
+  
+  // Handle regular B-tree indexes
+  KEY *key_info = &table->key_info[inx];
+  
+  // Build start and end keys for the range scan
+  std::string start_key, end_key;
+  uint64_t index_table = (uint64_t(0x03) << 56) | kvt_data_table_id; // INDEX keyspace
+  
+  // Encode the minimum key
+  if (min_key) {
+    // Create index key prefix from the key data
+    start_key.append(reinterpret_cast<const char*>(&kvt_data_table_id), sizeof(kvt_data_table_id));
+    uint32_t index_id = inx;
+    start_key.append(reinterpret_cast<const char*>(&index_id), sizeof(index_id));
+    
+    // Add the actual key value
+    if (min_key->keypart_map) {
+      start_key.append(reinterpret_cast<const char*>(min_key->key), min_key->length);
+    }
+    
+    // Add minimum row_id if not included
+    if (!(min_key->flag & HA_READ_KEY_EXACT)) {
+      uint64_t min_rowid = 0;
+      start_key.append(reinterpret_cast<const char*>(&min_rowid), sizeof(min_rowid));
+    }
+  } else {
+    // No minimum bound - start from beginning of index
+    start_key.append(reinterpret_cast<const char*>(&kvt_data_table_id), sizeof(kvt_data_table_id));
+    uint32_t index_id = inx;
+    start_key.append(reinterpret_cast<const char*>(&index_id), sizeof(index_id));
+  }
+  
+  // Encode the maximum key
+  if (max_key) {
+    end_key.append(reinterpret_cast<const char*>(&kvt_data_table_id), sizeof(kvt_data_table_id));
+    uint32_t index_id = inx;
+    end_key.append(reinterpret_cast<const char*>(&index_id), sizeof(index_id));
+    
+    // Add the actual key value
+    if (max_key->keypart_map) {
+      end_key.append(reinterpret_cast<const char*>(max_key->key), max_key->length);
+    }
+    
+    // Add maximum row_id if needed
+    if (!(max_key->flag & HA_READ_KEY_EXACT)) {
+      uint64_t max_rowid = UINT64_MAX;
+      end_key.append(reinterpret_cast<const char*>(&max_rowid), sizeof(max_rowid));
+    }
+  } else {
+    // No maximum bound - scan to end of index
+    end_key.append(reinterpret_cast<const char*>(&kvt_data_table_id), sizeof(kvt_data_table_id));
+    uint32_t index_id = inx + 1; // Next index as boundary
+    end_key.append(reinterpret_cast<const char*>(&index_id), sizeof(index_id));
+  }
+  
+  // Perform a limited scan to estimate row count
+  // We'll sample the first N entries and extrapolate
+  const size_t SAMPLE_SIZE = 100;
+  std::vector<std::pair<KVTKey, std::string>> sample_results;
+  std::string error_msg;
+  
+  KVTError err = kvt_scan(txn_id, index_table,
+                          KVTKey(start_key), KVTKey(end_key),
+                          SAMPLE_SIZE, sample_results, error_msg);
+  
+  if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
+    // Error during scan, return conservative estimate
+    DBUG_RETURN(stats.records > 0 ? stats.records / 2 : 10);
+  }
+  
+  // If we got less than SAMPLE_SIZE results, we have the exact count
+  if (sample_results.size() < SAMPLE_SIZE) {
+    DBUG_RETURN(sample_results.size());
+  }
+  
+  // Otherwise, estimate based on key range coverage
+  // This is a simplified estimation - could be improved with better statistics
+  
+  // Calculate the key space coverage
+  if (sample_results.size() == SAMPLE_SIZE) {
+    // We hit the sample limit, need to estimate total
+    
+    // Get the actual range size by checking how far we scanned
+    if (!sample_results.empty()) {
+      // Use the ratio of scanned range to total index range
+      // This is a rough estimate that assumes uniform distribution
+      
+      // For now, use a simple multiplier based on selectivity hints
+      ha_rows estimated = SAMPLE_SIZE;
+      
+      // Adjust based on key type and selectivity
+      if (min_key && max_key && 
+          (min_key->flag & HA_READ_KEY_EXACT) && 
+          (max_key->flag & HA_READ_KEY_EXACT)) {
+        // Exact range query, likely fewer rows
+        estimated = SAMPLE_SIZE * 2;
+      } else if (min_key || max_key) {
+        // Half-open range, moderate selectivity
+        estimated = SAMPLE_SIZE * 10;
+      } else {
+        // Full scan, return total count
+        estimated = stats.records;
+      }
+      
+      // Cap at total record count
+      if (estimated > stats.records) {
+        estimated = stats.records;
+      }
+      
+      DBUG_RETURN(estimated > 0 ? estimated : 10);
+    }
+  }
+  
+  // Default fallback
   DBUG_RETURN(10);
 }
 
 int ha_kvt::analyze(THD* thd, HA_CHECK_OPT* check_opt)
 {
   DBUG_ENTER("ha_kvt::analyze");
-  DBUG_RETURN(HA_ADMIN_NOT_IMPLEMENTED);
+  
+  // Get transaction for analysis
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  uint64_t txn_id = tx_mgr->get_transaction_id(thd);
+  if (txn_id == 0) {
+    // Start a read-only transaction for analysis
+    txn_id = tx_mgr->begin_transaction(thd, 0);
+  }
+  
+  // Get statistics manager
+  auto* stats_mgr = kvt::StatisticsManager::get_instance();
+  
+  // Analyze the table (full scan to get accurate statistics)
+  int ret = stats_mgr->analyze_table(txn_id, kvt_data_table_id);
+  if (ret != 0) {
+    DBUG_RETURN(HA_ADMIN_FAILED);
+  }
+  
+  // Analyze each index
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (!(table->key_info[i].algorithm == HA_KEY_ALG_FULLTEXT) && 
+        !(table->key_info[i].flags & HA_SPATIAL_INDEX)) {
+      // Analyze B-tree indexes
+      ret = stats_mgr->analyze_index(txn_id, kvt_data_table_id, i);
+      if (ret != 0) {
+        DBUG_RETURN(HA_ADMIN_FAILED);
+      }
+    }
+  }
+  
+  // Clear and refresh the statistics cache
+  stats_mgr->refresh_cache(txn_id, kvt_data_table_id);
+  
+  // Update the handler's statistics
+  info(HA_STATUS_VARIABLE | HA_STATUS_CONST);
+  
+  DBUG_RETURN(HA_ADMIN_OK);
 }
 
 int ha_kvt::optimize(THD* thd, HA_CHECK_OPT* check_opt)

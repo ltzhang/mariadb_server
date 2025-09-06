@@ -27,7 +27,7 @@
 
 // Forward declarations
 class Item;
-class COND;
+typedef Item COND;  // COND is a typedef for Item in MariaDB
 class Field;
 class TABLE;
 class THD;
