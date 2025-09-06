@@ -24,6 +24,10 @@
 #include "item.h"
 #include "kvt_transaction_manager.h"
 #include "kvt_index_manager.h"
+#include "kvt_query_optimizer.h"
+#include "kvt_foreign_key.h"
+#include "kvt_fulltext_adapter.h"
+#include "kvt_spatial_adapter.h"
 #include <mysql/plugin.h>
 
 static handler *kvt_create_handler(handlerton *hton,
@@ -324,6 +328,7 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     doing_bulk_insert(false),
     bulk_insert_rows(0),
     next_rowid(1),
+    ft_handler(nullptr),
     share(nullptr),
     scan_position(0),
     pushed_cond(nullptr),
@@ -461,6 +466,14 @@ int ha_kvt::write_row(const uchar *buf)
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   
+  // Check foreign key constraints
+  auto* fk_mgr = kvt_fk::ForeignKeyManager::get_instance();
+  kvt_fk::FKValidationResult fk_result = fk_mgr->validate_insert(ha_thd(), table, buf);
+  if (!fk_result.valid) {
+    my_error(ER_NO_REFERENCED_ROW_2, MYF(0), fk_result.error_message.c_str());
+    DBUG_RETURN(HA_ERR_NO_REFERENCED_ROW);
+  }
+  
   // Handle auto-increment if needed
   if (table->next_number_field && buf == table->record[0]) {
     int error = update_auto_increment();
@@ -512,6 +525,71 @@ int ha_kvt::write_row(const uchar *buf)
   // Store the current position key for subsequent operations
   current_position_key = data_key;
   
+  // Index document for FULLTEXT indexes
+  auto* fts_adapter = kvt_fts::KVTFulltextAdapter::get_instance();
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].flags & HA_FULLTEXT) {
+      // Get text from FULLTEXT columns
+      KEY *key_info = &table->key_info[i];
+      std::string combined_text;
+      
+      for (uint j = 0; j < key_info->user_defined_key_parts; j++) {
+        Field *field = key_info->key_part[j].field;
+        if (!field->is_null()) {
+          char buff[MAX_FIELD_WIDTH];
+          String str(buff, sizeof(buff), field->charset());
+          field->val_str(&str);
+          if (!combined_text.empty()) combined_text += " ";
+          combined_text += std::string(str.ptr(), str.length());
+        }
+      }
+      
+      if (!combined_text.empty()) {
+        // Use row_id as document ID (assuming it's unique)
+        uint64_t doc_id = next_rowid - 1;  // We already incremented it
+        fts_adapter->index_document(kvt_data_table_id, i, doc_id,
+                                   combined_text.c_str(), combined_text.length());
+      }
+    }
+  }
+  
+  // Index spatial data for SPATIAL indexes
+  auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].flags & HA_SPATIAL) {
+      // Get geometry from SPATIAL column
+      KEY *key_info = &table->key_info[i];
+      Field *field = key_info->key_part[0].field;  // SPATIAL indexes have single column
+      
+      if (!field->is_null()) {
+        // Get geometry data
+        String buffer;
+        field->val_str(&buffer);
+        
+        if (buffer.length() >= 4 + 4 * sizeof(double)) {
+          // Parse WKB to extract MBR
+          const uchar* wkb = (const uchar*)buffer.ptr();
+          uint32_t srid;
+          memcpy(&srid, wkb, sizeof(srid));
+          
+          // Skip SRID and WKB header to get to coordinates
+          const double* coords = (const double*)(wkb + 4 + 5);  // 4 for SRID, 5 for WKB header
+          
+          MBR mbr;
+          mbr.xmin = mbr.xmax = coords[0];
+          mbr.ymin = mbr.ymax = coords[1];
+          
+          // For now, just use point MBR (can be extended for other geometries)
+          uint64_t row_id = next_rowid - 1;
+          spatial_adapter->insert_spatial(kvt_txn, kvt_data_table_id, i, row_id, mbr);
+        }
+      }
+    }
+  }
+  
   DBUG_RETURN(0);
 }
 
@@ -521,6 +599,15 @@ int ha_kvt::update_row(const uchar *old_data, const uchar *new_data)
   
   if (kvt_data_table_id == 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  // Check foreign key constraints for update
+  auto* fk_mgr = kvt_fk::ForeignKeyManager::get_instance();
+  kvt_fk::FKValidationResult fk_result = fk_mgr->validate_update(ha_thd(), table, 
+                                                                old_data, new_data);
+  if (!fk_result.valid) {
+    my_error(ER_ROW_IS_REFERENCED_2, MYF(0), fk_result.error_message.c_str());
+    DBUG_RETURN(HA_ERR_ROW_IS_REFERENCED);
   }
   
   // Use stored position key for the old row
@@ -571,6 +658,14 @@ int ha_kvt::delete_row(const uchar *buf)
   
   if (kvt_data_table_id == 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  // Check foreign key constraints for delete
+  auto* fk_mgr = kvt_fk::ForeignKeyManager::get_instance();
+  kvt_fk::FKValidationResult fk_result = fk_mgr->validate_delete(ha_thd(), table, buf);
+  if (!fk_result.valid) {
+    my_error(ER_ROW_IS_REFERENCED_2, MYF(0), fk_result.error_message.c_str());
+    DBUG_RETURN(HA_ERR_ROW_IS_REFERENCED);
   }
   
   // Use stored position key
@@ -1222,11 +1317,27 @@ const COND *ha_kvt::cond_push(const COND *cond)
 {
   DBUG_ENTER("ha_kvt::cond_push");
   
-  // For now, we accept all conditions and evaluate them locally
-  // In future, we can use KVT's update functions for server-side filtering
-  pushed_cond = cond;
+  // Use the query optimizer to analyze and potentially push the condition
+  auto* optimizer = kvt_optimizer::KVTQueryOptimizer::get_instance();
   
-  DBUG_RETURN(cond);
+  // Try to push condition to KVT
+  bool pushed = optimizer->push_condition(kvt_tx_id, kvt_data_table_id, 
+                                         cond, table);
+  
+  if (pushed) {
+    // Condition was successfully pushed to KVT
+    // We still keep it for backup evaluation
+    pushed_cond = cond;
+    
+    // Return nullptr to indicate we handle the condition
+    DBUG_RETURN(nullptr);
+  } else {
+    // Condition couldn't be pushed, evaluate locally
+    pushed_cond = cond;
+    
+    // Return the condition for MariaDB to handle
+    DBUG_RETURN(cond);
+  }
 }
 
 void ha_kvt::cond_pop()
@@ -1256,6 +1367,278 @@ bool ha_kvt::check_pushed_condition(const uchar *buf)
   bool result = pushed_cond->val_int() != 0;
   
   DBUG_RETURN(result);
+}
+
+/**
+  Initialize full-text search
+  
+  @param flags  Search flags (FT_NL, FT_BOOL, etc.)
+  @param inx    Index number
+  @param key    Search query
+  
+  @return FT_INFO structure or NULL on error
+*/
+FT_INFO *ha_kvt::ft_init_ext(uint flags, uint inx, String *key)
+{
+  DBUG_ENTER("ha_kvt::ft_init_ext");
+  
+  // Check if index is fulltext
+  if (inx >= table->s->keys || !(table->key_info[inx].flags & HA_FULLTEXT)) {
+    DBUG_RETURN(nullptr);
+  }
+  
+  // Get FTS adapter instance
+  auto* fts_adapter = kvt_fts::KVTFulltextAdapter::get_instance();
+  
+  // Initialize search
+  ft_handler = fts_adapter->init_search(
+    kvt_data_table_id,
+    inx,  // Use index number as index_id
+    flags,
+    key->ptr(),
+    key->length(),
+    table->s->table_charset
+  );
+  
+  DBUG_RETURN(ft_handler);
+}
+
+/**
+  Read next row matching full-text search
+  
+  @param buf  Buffer to store row data
+  
+  @return 0 on success, HA_ERR_END_OF_FILE when no more rows
+*/
+int ha_kvt::ft_read(uchar *buf)
+{
+  DBUG_ENTER("ha_kvt::ft_read");
+  
+  if (!ft_handler) {
+    DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  }
+  
+  // Get next matching document ID
+  int error = ft_handler->please->read_next(ft_handler, (char*)buf);
+  if (error) {
+    DBUG_RETURN(error == HA_ERR_END_OF_FILE ? HA_ERR_END_OF_FILE : HA_ERR_GENERIC);
+  }
+  
+  // The FT handler returns doc_id, we need to fetch the actual row
+  // For now, we'll use the doc_id as row_id
+  kvt_fts::KVTFulltextInfo* kvt_ft = (kvt_fts::KVTFulltextInfo*)ft_handler;
+  uint64_t doc_id = kvt_ft->get_docid();
+  
+  // Construct key for the row
+  std::string row_key = std::to_string(doc_id);
+  std::string data_key = generate_data_key(row_key);
+  
+  // Get the row data
+  char value[65536];
+  size_t value_len = sizeof(value);
+  
+  int ret = kvt_get(kvt_tx_id, data_key.c_str(), data_key.length(),
+                   value, &value_len);
+  
+  if (ret == KVT_KEY_NOT_FOUND) {
+    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  }
+  if (ret != 0) {
+    DBUG_RETURN(map_kvt_error_to_mysql((KVTError)ret, "Failed to read row"));
+  }
+  
+  // Decode row
+  std::string value_str(value, value_len);
+  if (decode_row(value_str, buf) != 0) {
+    DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  DBUG_RETURN(0);
+}
+
+// Spatial search handle implementation
+class ha_kvt::SpatialSearchHandle {
+public:
+  std::unique_ptr<kvt_spatial::SpatialSearchIterator> iterator;
+  uint64_t table_id;
+  uint32_t index_id;
+  
+  SpatialSearchHandle(uint64_t tid, uint32_t iid) 
+    : table_id(tid), index_id(iid) {}
+};
+
+/**
+  Create a spatial index
+  
+  @param key_info  Key information
+  @param key_nr    Key number
+  
+  @return 0 on success, error code otherwise
+*/
+int ha_kvt::create_spatial_index(KEY* key_info, uint key_nr)
+{
+  DBUG_ENTER("ha_kvt::create_spatial_index");
+  
+  auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  
+  int ret = spatial_adapter->create_spatial_index(kvt_txn, kvt_data_table_id, key_nr);
+  
+  DBUG_RETURN(ret == 0 ? 0 : HA_ERR_GENERIC);
+}
+
+/**
+  Drop a spatial index
+  
+  @param key_nr  Key number
+  
+  @return 0 on success, error code otherwise
+*/
+int ha_kvt::drop_spatial_index(uint key_nr)
+{
+  DBUG_ENTER("ha_kvt::drop_spatial_index");
+  
+  auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  
+  int ret = spatial_adapter->drop_spatial_index(kvt_txn, kvt_data_table_id, key_nr);
+  
+  DBUG_RETURN(ret == 0 ? 0 : HA_ERR_GENERIC);
+}
+
+/**
+  Read rows using spatial index
+  
+  @param buf       Buffer to store row data
+  @param index     Index number
+  @param mbr_key   MBR key data
+  @param mbr_len   MBR key length
+  
+  @return 0 on success, error code otherwise
+*/
+int ha_kvt::index_read_spatial(uchar* buf, uint index, const uchar* mbr_key, uint mbr_len)
+{
+  DBUG_ENTER("ha_kvt::index_read_spatial");
+  
+  // Parse MBR from key
+  if (mbr_len < 4 * sizeof(double)) {
+    DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  }
+  
+  MBR search_mbr;
+  const double* coords = (const double*)mbr_key;
+  search_mbr.xmin = coords[0];
+  search_mbr.ymin = coords[1];
+  search_mbr.xmax = coords[2];
+  search_mbr.ymax = coords[3];
+  
+  // Initialize spatial search
+  int ret = spatial_search_init(index, mbr_key, mbr_len, 0);
+  if (ret != 0) {
+    DBUG_RETURN(ret);
+  }
+  
+  // Read first matching row
+  ret = spatial_search_next(buf);
+  
+  DBUG_RETURN(ret);
+}
+
+/**
+  Initialize spatial search
+  
+  @param index     Index number
+  @param mbr_key   MBR key data
+  @param mbr_len   MBR key length
+  @param flags     Search flags
+  
+  @return 0 on success, error code otherwise
+*/
+int ha_kvt::spatial_search_init(uint index, const uchar* mbr_key, uint mbr_len, uint flags)
+{
+  DBUG_ENTER("ha_kvt::spatial_search_init");
+  
+  // Clean up previous search
+  spatial_search.reset();
+  
+  // Parse MBR from key
+  if (mbr_len < 4 * sizeof(double)) {
+    DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  }
+  
+  MBR search_mbr;
+  const double* coords = (const double*)mbr_key;
+  search_mbr.xmin = coords[0];
+  search_mbr.ymin = coords[1];
+  search_mbr.xmax = coords[2];
+  search_mbr.ymax = coords[3];
+  
+  // Create search handle
+  spatial_search = std::make_unique<SpatialSearchHandle>(kvt_data_table_id, index);
+  
+  // Initialize search iterator
+  auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
+  auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
+  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  
+  spatial_search->iterator = spatial_adapter->search(
+    kvt_txn,
+    kvt_data_table_id,
+    index,
+    search_mbr,
+    kvt_spatial::SP_INTERSECTS  // Default to INTERSECTS
+  );
+  
+  DBUG_RETURN(0);
+}
+
+/**
+  Read next row from spatial search
+  
+  @param buf  Buffer to store row data
+  
+  @return 0 on success, HA_ERR_END_OF_FILE when no more rows
+*/
+int ha_kvt::spatial_search_next(uchar* buf)
+{
+  DBUG_ENTER("ha_kvt::spatial_search_next");
+  
+  if (!spatial_search || !spatial_search->iterator) {
+    DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  }
+  
+  uint64_t row_id;
+  if (!spatial_search->iterator->get_next(row_id)) {
+    DBUG_RETURN(HA_ERR_END_OF_FILE);
+  }
+  
+  // Fetch row by ID
+  std::string row_key = std::to_string(row_id);
+  std::string data_key = generate_data_key(row_key);
+  
+  // Get row data
+  char value[65536];
+  size_t value_len = sizeof(value);
+  
+  int ret = kvt_get(kvt_tx_id, data_key.c_str(), data_key.length(),
+                   value, &value_len);
+  
+  if (ret == KVT_KEY_NOT_FOUND) {
+    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  }
+  if (ret != 0) {
+    DBUG_RETURN(map_kvt_error_to_mysql((KVTError)ret, "Failed to read row"));
+  }
+  
+  // Decode row
+  std::string value_str(value, value_len);
+  if (decode_row(value_str, buf) != 0) {
+    DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  DBUG_RETURN(0);
 }
 
 struct st_mysql_storage_engine kvt_storage_engine =

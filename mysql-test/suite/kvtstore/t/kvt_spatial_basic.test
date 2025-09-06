@@ -1,0 +1,199 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Test basic spatial index functionality in KVT storage engine
+--echo #
+
+--disable_warnings
+DROP TABLE IF EXISTS locations;
+DROP TABLE IF EXISTS cities;
+DROP TABLE IF EXISTS regions;
+--enable_warnings
+
+--echo # Test 1: Create table with SPATIAL index on POINT column
+CREATE TABLE locations (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(100),
+  position POINT NOT NULL,
+  SPATIAL INDEX idx_position (position)
+) ENGINE=KVT;
+
+--echo # Insert point data
+INSERT INTO locations (name, position) VALUES
+  ('Tokyo', ST_GeomFromText('POINT(139.6917 35.6895)')),
+  ('New York', ST_GeomFromText('POINT(-74.0060 40.7128)')),
+  ('London', ST_GeomFromText('POINT(-0.1276 51.5074)')),
+  ('Paris', ST_GeomFromText('POINT(2.3522 48.8566)')),
+  ('Sydney', ST_GeomFromText('POINT(151.2093 -33.8688)'));
+
+--echo # Test spatial queries with ST_Contains
+SELECT name FROM locations 
+WHERE ST_Contains(
+  ST_GeomFromText('POLYGON((0 0, 0 60, 180 60, 180 0, 0 0))'),
+  position
+)
+ORDER BY name;
+
+--echo # Test spatial queries with ST_Within
+SELECT name FROM locations
+WHERE ST_Within(
+  position,
+  ST_GeomFromText('POLYGON((-180 -90, -180 90, 0 90, 0 -90, -180 -90))')
+)
+ORDER BY name;
+
+--echo # Test spatial queries with ST_Intersects
+SELECT name FROM locations
+WHERE ST_Intersects(
+  position,
+  ST_GeomFromText('POLYGON((100 -50, 100 50, 180 50, 180 -50, 100 -50))')
+)
+ORDER BY name;
+
+--echo # Test 2: Create table with SPATIAL index on POLYGON column
+CREATE TABLE cities (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  city_name VARCHAR(100),
+  boundary POLYGON NOT NULL,
+  SPATIAL INDEX idx_boundary (boundary)
+) ENGINE=KVT;
+
+--echo # Insert polygon data
+INSERT INTO cities (city_name, boundary) VALUES
+  ('City A', ST_GeomFromText('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')),
+  ('City B', ST_GeomFromText('POLYGON((5 5, 15 5, 15 15, 5 15, 5 5))')),
+  ('City C', ST_GeomFromText('POLYGON((20 20, 30 20, 30 30, 20 30, 20 20))'));
+
+--echo # Test polygon intersection
+SELECT city_name FROM cities
+WHERE ST_Intersects(
+  boundary,
+  ST_GeomFromText('POLYGON((7 7, 12 7, 12 12, 7 12, 7 7))')
+)
+ORDER BY city_name;
+
+--echo # Test polygon containment
+SELECT city_name FROM cities
+WHERE ST_Contains(
+  boundary,
+  ST_GeomFromText('POINT(8 8)')
+)
+ORDER BY city_name;
+
+--echo # Test 3: Create table with SPATIAL index on LINESTRING column
+CREATE TABLE regions (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  region_name VARCHAR(100),
+  border LINESTRING NOT NULL,
+  SPATIAL INDEX idx_border (border)
+) ENGINE=KVT;
+
+--echo # Insert linestring data
+INSERT INTO regions (region_name, border) VALUES
+  ('Route 1', ST_GeomFromText('LINESTRING(0 0, 10 10, 20 0)')),
+  ('Route 2', ST_GeomFromText('LINESTRING(0 20, 10 20, 20 20)')),
+  ('Route 3', ST_GeomFromText('LINESTRING(5 0, 5 25)'));
+
+--echo # Test linestring intersection
+SELECT region_name FROM regions
+WHERE ST_Intersects(
+  border,
+  ST_GeomFromText('POLYGON((4 4, 6 4, 6 6, 4 6, 4 4))')
+)
+ORDER BY region_name;
+
+--echo # Test 4: Test updates with spatial index
+UPDATE locations 
+SET position = ST_GeomFromText('POINT(100 100)')
+WHERE name = 'Tokyo';
+
+SELECT name, ST_AsText(position) FROM locations
+WHERE name = 'Tokyo';
+
+--echo # Verify spatial query after update
+SELECT name FROM locations
+WHERE ST_Distance(
+  position,
+  ST_GeomFromText('POINT(100 100)')
+) < 1
+ORDER BY name;
+
+--echo # Test 5: Test deletes with spatial index
+DELETE FROM locations WHERE name = 'Paris';
+
+SELECT COUNT(*) FROM locations;
+
+--echo # Verify Paris is not in spatial query results
+SELECT name FROM locations
+WHERE ST_Within(
+  position,
+  ST_GeomFromText('POLYGON((0 40, 0 60, 10 60, 10 40, 0 40))')
+)
+ORDER BY name;
+
+--echo # Test 6: Test NULL handling in spatial columns
+CREATE TABLE test_null (
+  id INT PRIMARY KEY,
+  location POINT,
+  SPATIAL INDEX idx_loc (location)
+) ENGINE=KVT;
+
+--error ER_NOT_NULL_GEOMETRY
+INSERT INTO test_null VALUES (1, NULL);
+
+INSERT INTO test_null VALUES (2, ST_GeomFromText('POINT(10 10)'));
+SELECT id FROM test_null WHERE location IS NOT NULL;
+
+--echo # Test 7: Test multi-column table with spatial index
+CREATE TABLE complex_spatial (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  category VARCHAR(50),
+  description TEXT,
+  location POINT NOT NULL,
+  area POLYGON,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  SPATIAL INDEX idx_location (location),
+  SPATIAL INDEX idx_area (area),
+  INDEX idx_category (category)
+) ENGINE=KVT;
+
+INSERT INTO complex_spatial (category, description, location, area) VALUES
+  ('Restaurant', 'Italian restaurant', 
+   ST_GeomFromText('POINT(10 20)'),
+   ST_GeomFromText('POLYGON((9 19, 11 19, 11 21, 9 21, 9 19))')),
+  ('Shop', 'Grocery store',
+   ST_GeomFromText('POINT(15 25)'),
+   ST_GeomFromText('POLYGON((14 24, 16 24, 16 26, 14 26, 14 24))')),
+  ('Park', 'City park',
+   ST_GeomFromText('POINT(20 30)'),
+   ST_GeomFromText('POLYGON((18 28, 22 28, 22 32, 18 32, 18 28))'));
+
+--echo # Query using spatial index
+SELECT category, description
+FROM complex_spatial
+WHERE ST_Contains(
+  area,
+  ST_GeomFromText('POINT(10 20)')
+)
+ORDER BY category;
+
+--echo # Combined spatial and regular index query
+SELECT category, description
+FROM complex_spatial
+WHERE category = 'Restaurant'
+  AND ST_Distance(location, ST_GeomFromText('POINT(10 20)')) < 1;
+
+--echo # Test 8: Test distance-based queries
+SELECT l1.name AS from_city, l2.name AS to_city,
+       ST_Distance(l1.position, l2.position) AS distance
+FROM locations l1, locations l2
+WHERE l1.id < l2.id
+  AND ST_Distance(l1.position, l2.position) < 50
+ORDER BY distance;
+
+--echo # Cleanup
+DROP TABLE locations;
+DROP TABLE cities;
+DROP TABLE regions;
+DROP TABLE test_null;
+DROP TABLE complex_spatial;

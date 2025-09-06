@@ -1,0 +1,197 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test batch operation optimization
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_batch;
+USE test_kvt_batch;
+
+--echo #
+--echo # Test 1: Bulk INSERT optimization
+--echo #
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  data VARCHAR(100),
+  value INT
+) ENGINE=KVT;
+
+--echo # Small batch insert (should batch)
+INSERT INTO t1 VALUES 
+  (1, 'row1', 100),
+  (2, 'row2', 200),
+  (3, 'row3', 300),
+  (4, 'row4', 400),
+  (5, 'row5', 500);
+
+SELECT COUNT(*) FROM t1;
+
+--echo # Large batch insert using stored procedure
+DELIMITER //
+CREATE PROCEDURE bulk_insert()
+BEGIN
+  DECLARE i INT DEFAULT 6;
+  WHILE i <= 1000 DO
+    INSERT INTO t1 VALUES (i, CONCAT('row', i), i * 100);
+    SET i = i + 1;
+  END WHILE;
+END//
+DELIMITER ;
+
+CALL bulk_insert();
+DROP PROCEDURE bulk_insert;
+
+SELECT COUNT(*) FROM t1;
+SELECT * FROM t1 WHERE id IN (1, 500, 1000);
+
+DROP TABLE t1;
+
+--echo #
+--echo # Test 2: Batch UPDATE operations
+--echo #
+CREATE TABLE t2 (
+  id INT PRIMARY KEY,
+  status VARCHAR(20),
+  counter INT
+) ENGINE=KVT;
+
+--echo # Insert test data
+INSERT INTO t2 VALUES 
+  (1, 'active', 0),
+  (2, 'active', 0),
+  (3, 'inactive', 0),
+  (4, 'active', 0),
+  (5, 'pending', 0);
+
+--echo # Batch update with condition
+UPDATE t2 SET counter = counter + 1 WHERE status = 'active';
+SELECT * FROM t2 ORDER BY id;
+
+--echo # Batch update all rows
+UPDATE t2 SET counter = counter + 10;
+SELECT * FROM t2 ORDER BY id;
+
+DROP TABLE t2;
+
+--echo #
+--echo # Test 3: Batch DELETE operations
+--echo #
+CREATE TABLE t3 (
+  id INT PRIMARY KEY,
+  category VARCHAR(20),
+  obsolete BOOLEAN
+) ENGINE=KVT;
+
+--echo # Insert test data
+INSERT INTO t3 VALUES 
+  (1, 'A', FALSE),
+  (2, 'B', TRUE),
+  (3, 'A', FALSE),
+  (4, 'C', TRUE),
+  (5, 'B', FALSE),
+  (6, 'A', TRUE),
+  (7, 'C', FALSE),
+  (8, 'B', TRUE),
+  (9, 'A', FALSE),
+  (10, 'C', TRUE);
+
+SELECT COUNT(*) FROM t3;
+
+--echo # Batch delete with condition
+DELETE FROM t3 WHERE obsolete = TRUE;
+SELECT COUNT(*) FROM t3;
+SELECT * FROM t3 ORDER BY id;
+
+--echo # Delete by category
+DELETE FROM t3 WHERE category = 'B';
+SELECT COUNT(*) FROM t3;
+SELECT * FROM t3 ORDER BY id;
+
+DROP TABLE t3;
+
+--echo #
+--echo # Test 4: Mixed batch operations in transaction
+--echo #
+CREATE TABLE t4 (
+  id INT PRIMARY KEY,
+  value INT
+) ENGINE=KVT;
+
+BEGIN;
+
+--echo # Batch insert in transaction
+INSERT INTO t4 VALUES 
+  (1, 100), (2, 200), (3, 300), (4, 400), (5, 500);
+
+--echo # Batch update in same transaction
+UPDATE t4 SET value = value * 2 WHERE id <= 3;
+
+--echo # Check intermediate state
+SELECT * FROM t4 ORDER BY id;
+
+COMMIT;
+
+--echo # Verify after commit
+SELECT * FROM t4 ORDER BY id;
+
+BEGIN;
+
+--echo # Batch operations that will be rolled back
+INSERT INTO t4 VALUES (6, 600), (7, 700);
+UPDATE t4 SET value = 0 WHERE id > 5;
+DELETE FROM t4 WHERE id = 1;
+
+ROLLBACK;
+
+--echo # Verify rollback worked
+SELECT * FROM t4 ORDER BY id;
+
+DROP TABLE t4;
+
+--echo #
+--echo # Test 5: Performance comparison
+--echo #
+CREATE TABLE t5 (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  data VARCHAR(100)
+) ENGINE=KVT;
+
+--echo # Insert 100 rows one by one (not optimized)
+--disable_query_log
+DELIMITER //
+CREATE PROCEDURE single_insert()
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  WHILE i <= 100 DO
+    INSERT INTO t5 (data) VALUES (CONCAT('single_', i));
+    SET i = i + 1;
+  END WHILE;
+END//
+DELIMITER ;
+
+CALL single_insert();
+DROP PROCEDURE single_insert;
+--enable_query_log
+
+SELECT COUNT(*) FROM t5;
+SELECT MIN(id), MAX(id) FROM t5;
+
+TRUNCATE TABLE t5;
+
+--echo # Insert 100 rows in batches (optimized)
+INSERT INTO t5 (data) SELECT CONCAT('batch_', seq) FROM seq_1_to_100;
+
+SELECT COUNT(*) FROM t5;
+SELECT MIN(id), MAX(id) FROM t5;
+
+DROP TABLE t5;
+
+--echo # Cleanup
+DROP DATABASE test_kvt_batch;

@@ -48,6 +48,13 @@ class ha_kvt: public handler
   // For auto-increment
   uint64_t next_rowid;
   
+  // Full-text search
+  FT_INFO *ft_handler;
+  
+  // Spatial index support
+  class SpatialSearchHandle;
+  std::unique_ptr<SpatialSearchHandle> spatial_search;
+  
   struct kvt_table_share {
     THR_LOCK lock;
     uint64_t data_table_id;  // KVT table ID for database data
@@ -138,6 +145,17 @@ public:
   // Condition pushdown
   const COND *cond_push(const COND *cond) override;
   void cond_pop() override;
+  
+  // Full-text search support
+  FT_INFO *ft_init_ext(uint flags, uint inx, String *key) override;
+  int ft_read(uchar *buf) override;
+  
+  // Spatial index support
+  int create_spatial_index(KEY* key_info, uint key_nr);
+  int drop_spatial_index(uint key_nr);
+  int index_read_spatial(uchar* buf, uint index, const uchar* mbr_key, uint mbr_len);
+  int spatial_search_init(uint index, const uchar* mbr_key, uint mbr_len, uint flags);
+  int spatial_search_next(uchar* buf);
 
   THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to,
                              enum thr_lock_type lock_type) override;

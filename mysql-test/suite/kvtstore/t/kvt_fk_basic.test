@@ -1,0 +1,224 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test basic foreign key functionality
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_fk;
+USE test_kvt_fk;
+
+--echo #
+--echo # Test 1: Simple parent-child relationship
+--echo #
+CREATE TABLE parent (
+  id INT PRIMARY KEY,
+  name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE child (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  data VARCHAR(50),
+  FOREIGN KEY (parent_id) REFERENCES parent(id)
+) ENGINE=KVT;
+
+--echo # Insert parent records
+INSERT INTO parent VALUES (1, 'Parent 1');
+INSERT INTO parent VALUES (2, 'Parent 2');
+INSERT INTO parent VALUES (3, 'Parent 3');
+
+--echo # Insert valid child records
+INSERT INTO child VALUES (1, 1, 'Child of 1');
+INSERT INTO child VALUES (2, 2, 'Child of 2');
+INSERT INTO child VALUES (3, 1, 'Another child of 1');
+
+--echo # Try to insert child with non-existent parent (should fail)
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO child VALUES (4, 99, 'Invalid parent');
+
+--echo # Verify data
+SELECT * FROM parent ORDER BY id;
+SELECT * FROM child ORDER BY id;
+
+DROP TABLE child;
+DROP TABLE parent;
+
+--echo #
+--echo # Test 2: Multi-column foreign key
+--echo #
+CREATE TABLE parent2 (
+  company_id INT,
+  dept_id INT,
+  dept_name VARCHAR(50),
+  PRIMARY KEY (company_id, dept_id)
+) ENGINE=KVT;
+
+CREATE TABLE employee (
+  emp_id INT PRIMARY KEY,
+  company_id INT,
+  dept_id INT,
+  emp_name VARCHAR(50),
+  FOREIGN KEY (company_id, dept_id) REFERENCES parent2(company_id, dept_id)
+) ENGINE=KVT;
+
+--echo # Insert parent records
+INSERT INTO parent2 VALUES (1, 100, 'Engineering');
+INSERT INTO parent2 VALUES (1, 200, 'Sales');
+INSERT INTO parent2 VALUES (2, 100, 'Marketing');
+
+--echo # Insert valid employees
+INSERT INTO employee VALUES (1, 1, 100, 'John');
+INSERT INTO employee VALUES (2, 1, 200, 'Jane');
+INSERT INTO employee VALUES (3, 2, 100, 'Bob');
+
+--echo # Try invalid foreign key combination
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO employee VALUES (4, 1, 300, 'Invalid');
+
+--echo # Try partial match (should fail)
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO employee VALUES (5, 2, 200, 'No such dept');
+
+SELECT * FROM parent2 ORDER BY company_id, dept_id;
+SELECT * FROM employee ORDER BY emp_id;
+
+DROP TABLE employee;
+DROP TABLE parent2;
+
+--echo #
+--echo # Test 3: Self-referencing table
+--echo #
+CREATE TABLE category (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  parent_category_id INT,
+  FOREIGN KEY (parent_category_id) REFERENCES category(id)
+) ENGINE=KVT;
+
+--echo # Insert root categories (NULL parent)
+INSERT INTO category VALUES (1, 'Electronics', NULL);
+INSERT INTO category VALUES (2, 'Books', NULL);
+
+--echo # Insert subcategories
+INSERT INTO category VALUES (10, 'Computers', 1);
+INSERT INTO category VALUES (11, 'Phones', 1);
+INSERT INTO category VALUES (20, 'Fiction', 2);
+
+--echo # Try to insert with invalid parent
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO category VALUES (30, 'Invalid', 99);
+
+SELECT * FROM category ORDER BY id;
+
+DROP TABLE category;
+
+--echo #
+--echo # Test 4: NULL handling in foreign keys
+--echo #
+CREATE TABLE parent3 (
+  id INT PRIMARY KEY,
+  data VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE child3 (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  info VARCHAR(50),
+  FOREIGN KEY (parent_id) REFERENCES parent3(id)
+) ENGINE=KVT;
+
+INSERT INTO parent3 VALUES (1, 'Parent 1');
+INSERT INTO parent3 VALUES (2, 'Parent 2');
+
+--echo # NULL foreign key should be allowed
+INSERT INTO child3 VALUES (1, NULL, 'Orphan record');
+INSERT INTO child3 VALUES (2, 1, 'Has parent');
+INSERT INTO child3 VALUES (3, NULL, 'Another orphan');
+
+SELECT * FROM child3 ORDER BY id;
+
+DROP TABLE child3;
+DROP TABLE parent3;
+
+--echo #
+--echo # Test 5: Update operations with foreign keys
+--echo #
+CREATE TABLE parent4 (
+  id INT PRIMARY KEY,
+  status VARCHAR(20)
+) ENGINE=KVT;
+
+CREATE TABLE child4 (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  value INT,
+  FOREIGN KEY (parent_id) REFERENCES parent4(id)
+) ENGINE=KVT;
+
+INSERT INTO parent4 VALUES (1, 'active');
+INSERT INTO parent4 VALUES (2, 'inactive');
+
+INSERT INTO child4 VALUES (1, 1, 100);
+INSERT INTO child4 VALUES (2, 1, 200);
+INSERT INTO child4 VALUES (3, 2, 300);
+
+--echo # Update child to reference different parent
+UPDATE child4 SET parent_id = 2 WHERE id = 1;
+
+--echo # Try to update to non-existent parent
+--error ER_NO_REFERENCED_ROW_2
+UPDATE child4 SET parent_id = 99 WHERE id = 2;
+
+SELECT * FROM child4 ORDER BY id;
+
+DROP TABLE child4;
+DROP TABLE parent4;
+
+--echo #
+--echo # Test 6: Delete restrictions
+--echo #
+CREATE TABLE parent5 (
+  id INT PRIMARY KEY,
+  name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE child5 (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  data VARCHAR(50),
+  FOREIGN KEY (parent_id) REFERENCES parent5(id)
+) ENGINE=KVT;
+
+INSERT INTO parent5 VALUES (1, 'Parent 1');
+INSERT INTO parent5 VALUES (2, 'Parent 2');
+INSERT INTO parent5 VALUES (3, 'Parent 3');
+
+INSERT INTO child5 VALUES (1, 1, 'Child of 1');
+INSERT INTO child5 VALUES (2, 2, 'Child of 2');
+
+--echo # Try to delete parent with children (should fail with RESTRICT)
+--error ER_ROW_IS_REFERENCED_2
+DELETE FROM parent5 WHERE id = 1;
+
+--echo # Delete parent without children (should succeed)
+DELETE FROM parent5 WHERE id = 3;
+
+--echo # Delete child first, then parent
+DELETE FROM child5 WHERE parent_id = 1;
+DELETE FROM parent5 WHERE id = 1;
+
+SELECT * FROM parent5 ORDER BY id;
+SELECT * FROM child5 ORDER BY id;
+
+DROP TABLE child5;
+DROP TABLE parent5;
+
+--echo # Cleanup
+DROP DATABASE test_kvt_fk;

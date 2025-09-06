@@ -1,0 +1,195 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test basic FULLTEXT search functionality
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_fts;
+USE test_kvt_fts;
+
+--echo #
+--echo # Test 1: Basic FULLTEXT index creation and search
+--echo #
+CREATE TABLE articles (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  title VARCHAR(200),
+  body TEXT,
+  FULLTEXT(title, body)
+) ENGINE=KVT;
+
+--echo # Insert test data
+INSERT INTO articles (title, body) VALUES
+  ('MySQL Tutorial', 'DBMS stands for Database Management System'),
+  ('How To Use MySQL', 'After you went through a lot of tutorials'),
+  ('Optimizing MySQL', 'In this tutorial we will show you how to optimize'),
+  ('MySQL vs MariaDB', 'MariaDB is a fork of MySQL database'),
+  ('MySQL Security', 'Security is important when dealing with databases');
+
+--echo # Natural language search
+SELECT id, title FROM articles 
+WHERE MATCH(title, body) AGAINST('tutorial');
+
+SELECT id, title FROM articles
+WHERE MATCH(title, body) AGAINST('MySQL database');
+
+--echo # With relevance score
+SELECT id, title, MATCH(title, body) AGAINST('MySQL') AS score
+FROM articles
+WHERE MATCH(title, body) AGAINST('MySQL')
+ORDER BY score DESC;
+
+DROP TABLE articles;
+
+--echo #
+--echo # Test 2: Boolean mode search
+--echo #
+CREATE TABLE posts (
+  id INT PRIMARY KEY,
+  content TEXT,
+  FULLTEXT(content)
+) ENGINE=KVT;
+
+INSERT INTO posts VALUES
+  (1, 'MySQL is a popular database system'),
+  (2, 'MariaDB is based on MySQL code'),
+  (3, 'PostgreSQL is another database system'),
+  (4, 'MySQL and MariaDB share common features'),
+  (5, 'Database optimization is important');
+
+--echo # Boolean mode: must have MySQL
+SELECT id FROM posts
+WHERE MATCH(content) AGAINST('+MySQL' IN BOOLEAN MODE);
+
+--echo # Boolean mode: must have database, must not have PostgreSQL
+SELECT id FROM posts
+WHERE MATCH(content) AGAINST('+database -PostgreSQL' IN BOOLEAN MODE);
+
+--echo # Boolean mode: MySQL or MariaDB
+SELECT id FROM posts
+WHERE MATCH(content) AGAINST('MySQL MariaDB' IN BOOLEAN MODE);
+
+DROP TABLE posts;
+
+--echo #
+--echo # Test 3: Single column FULLTEXT
+--echo #
+CREATE TABLE documents (
+  doc_id INT PRIMARY KEY,
+  doc_text TEXT,
+  FULLTEXT idx_text (doc_text)
+) ENGINE=KVT;
+
+INSERT INTO documents VALUES
+  (1, 'The quick brown fox jumps over the lazy dog'),
+  (2, 'A quick brown fox is faster than a slow turtle'),
+  (3, 'The lazy dog sleeps all day long'),
+  (4, 'Foxes are clever animals'),
+  (5, 'Dogs are loyal companions');
+
+SELECT doc_id FROM documents
+WHERE MATCH(doc_text) AGAINST('fox');
+
+SELECT doc_id FROM documents
+WHERE MATCH(doc_text) AGAINST('quick brown');
+
+DROP TABLE documents;
+
+--echo #
+--echo # Test 4: Multiple FULLTEXT indexes
+--echo #
+CREATE TABLE products (
+  id INT PRIMARY KEY,
+  name VARCHAR(100),
+  description TEXT,
+  tags VARCHAR(200),
+  FULLTEXT idx_name (name),
+  FULLTEXT idx_desc (description),
+  FULLTEXT idx_combined (name, description)
+) ENGINE=KVT;
+
+INSERT INTO products VALUES
+  (1, 'MySQL Book', 'Complete guide to MySQL database', 'database, mysql, book'),
+  (2, 'PHP Tutorial', 'Learn PHP programming with MySQL', 'php, programming, mysql'),
+  (3, 'Database Design', 'Best practices for database design', 'database, design, theory');
+
+--echo # Search in name only
+SELECT id, name FROM products
+WHERE MATCH(name) AGAINST('MySQL');
+
+--echo # Search in description only
+SELECT id, name FROM products
+WHERE MATCH(description) AGAINST('database');
+
+--echo # Search in combined index
+SELECT id, name FROM products
+WHERE MATCH(name, description) AGAINST('MySQL database');
+
+DROP TABLE products;
+
+--echo #
+--echo # Test 5: Updates and deletes with FULLTEXT
+--echo #
+CREATE TABLE messages (
+  msg_id INT PRIMARY KEY,
+  msg_text TEXT,
+  FULLTEXT(msg_text)
+) ENGINE=KVT;
+
+INSERT INTO messages VALUES
+  (1, 'Hello world from MySQL'),
+  (2, 'MariaDB is great'),
+  (3, 'Testing fulltext search');
+
+--echo # Initial search
+SELECT msg_id FROM messages
+WHERE MATCH(msg_text) AGAINST('MySQL');
+
+--echo # Update a record
+UPDATE messages SET msg_text = 'Hello world from MariaDB'
+WHERE msg_id = 1;
+
+--echo # Search after update
+SELECT msg_id FROM messages
+WHERE MATCH(msg_text) AGAINST('MySQL');
+
+SELECT msg_id FROM messages
+WHERE MATCH(msg_text) AGAINST('MariaDB');
+
+--echo # Delete a record
+DELETE FROM messages WHERE msg_id = 2;
+
+--echo # Search after delete
+SELECT msg_id FROM messages
+WHERE MATCH(msg_text) AGAINST('MariaDB');
+
+DROP TABLE messages;
+
+--echo #
+--echo # Test 6: NULL values in FULLTEXT columns
+--echo #
+CREATE TABLE nullable_text (
+  id INT PRIMARY KEY,
+  text_col TEXT,
+  FULLTEXT(text_col)
+) ENGINE=KVT;
+
+INSERT INTO nullable_text VALUES
+  (1, 'Some text content'),
+  (2, NULL),
+  (3, 'More text content'),
+  (4, '');
+
+SELECT id FROM nullable_text
+WHERE MATCH(text_col) AGAINST('text');
+
+DROP TABLE nullable_text;
+
+--echo # Cleanup
+DROP DATABASE test_kvt_fts;

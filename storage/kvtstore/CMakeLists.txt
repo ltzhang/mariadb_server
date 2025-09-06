@@ -12,7 +12,15 @@ SET(KVT_SOURCES
     kvt_transaction_manager.cc
     kvt_transaction_manager.h
     kvt_index_manager.cc
-    kvt_index_manager.h)
+    kvt_index_manager.h
+    kvt_query_optimizer.cc
+    kvt_query_optimizer.h
+    kvt_foreign_key.cc
+    kvt_foreign_key.h
+    kvt_fulltext_adapter.cc
+    kvt_fulltext_adapter.h
+    kvt_spatial_adapter.cc
+    kvt_spatial_adapter.h)
 
 # Include directories
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/sql

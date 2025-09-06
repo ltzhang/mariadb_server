@@ -1,0 +1,272 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test CASCADE and SET NULL foreign key actions
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_fk_cascade;
+USE test_kvt_fk_cascade;
+
+--echo #
+--echo # Test 1: CASCADE DELETE
+--echo #
+CREATE TABLE department (
+  dept_id INT PRIMARY KEY,
+  dept_name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE employee (
+  emp_id INT PRIMARY KEY,
+  dept_id INT,
+  emp_name VARCHAR(50),
+  FOREIGN KEY (dept_id) REFERENCES department(dept_id) ON DELETE CASCADE
+) ENGINE=KVT;
+
+--echo # Insert departments
+INSERT INTO department VALUES (1, 'Engineering');
+INSERT INTO department VALUES (2, 'Sales');
+INSERT INTO department VALUES (3, 'Marketing');
+
+--echo # Insert employees
+INSERT INTO employee VALUES (101, 1, 'Alice');
+INSERT INTO employee VALUES (102, 1, 'Bob');
+INSERT INTO employee VALUES (103, 2, 'Charlie');
+INSERT INTO employee VALUES (104, 2, 'David');
+INSERT INTO employee VALUES (105, 3, 'Eve');
+
+--echo # Delete department 1 (should cascade delete Alice and Bob)
+DELETE FROM department WHERE dept_id = 1;
+
+--echo # Verify cascaded deletes
+SELECT * FROM department ORDER BY dept_id;
+SELECT * FROM employee ORDER BY emp_id;
+
+--echo # Delete department 2 (should cascade delete Charlie and David)
+DELETE FROM department WHERE dept_id = 2;
+
+SELECT * FROM employee ORDER BY emp_id;
+
+DROP TABLE employee;
+DROP TABLE department;
+
+--echo #
+--echo # Test 2: CASCADE UPDATE
+--echo #
+CREATE TABLE country (
+  country_code CHAR(2) PRIMARY KEY,
+  country_name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE city (
+  city_id INT PRIMARY KEY,
+  country_code CHAR(2),
+  city_name VARCHAR(50),
+  FOREIGN KEY (country_code) REFERENCES country(country_code) ON UPDATE CASCADE
+) ENGINE=KVT;
+
+INSERT INTO country VALUES ('US', 'United States');
+INSERT INTO country VALUES ('UK', 'United Kingdom');
+INSERT INTO country VALUES ('FR', 'France');
+
+INSERT INTO city VALUES (1, 'US', 'New York');
+INSERT INTO city VALUES (2, 'US', 'Los Angeles');
+INSERT INTO city VALUES (3, 'UK', 'London');
+INSERT INTO city VALUES (4, 'FR', 'Paris');
+
+--echo # Update country code (should cascade to cities)
+UPDATE country SET country_code = 'GB' WHERE country_code = 'UK';
+
+SELECT * FROM country ORDER BY country_code;
+SELECT * FROM city ORDER BY city_id;
+
+--echo # Verify foreign key still works after cascade
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO city VALUES (5, 'UK', 'Manchester');
+
+INSERT INTO city VALUES (5, 'GB', 'Manchester');
+SELECT * FROM city WHERE country_code = 'GB' ORDER BY city_id;
+
+DROP TABLE city;
+DROP TABLE country;
+
+--echo #
+--echo # Test 3: SET NULL on DELETE
+--echo #
+CREATE TABLE project (
+  project_id INT PRIMARY KEY,
+  project_name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE task (
+  task_id INT PRIMARY KEY,
+  project_id INT,
+  task_name VARCHAR(50),
+  FOREIGN KEY (project_id) REFERENCES project(project_id) ON DELETE SET NULL
+) ENGINE=KVT;
+
+INSERT INTO project VALUES (1, 'Website Redesign');
+INSERT INTO project VALUES (2, 'Mobile App');
+INSERT INTO project VALUES (3, 'Database Migration');
+
+INSERT INTO task VALUES (101, 1, 'Design mockups');
+INSERT INTO task VALUES (102, 1, 'Frontend development');
+INSERT INTO task VALUES (103, 2, 'iOS development');
+INSERT INTO task VALUES (104, 2, 'Android development');
+INSERT INTO task VALUES (105, 3, 'Schema design');
+INSERT INTO task VALUES (106, NULL, 'Research task');
+
+--echo # Delete project 1 (should set tasks' project_id to NULL)
+DELETE FROM project WHERE project_id = 1;
+
+SELECT * FROM task ORDER BY task_id;
+
+--echo # Verify NULL project_id tasks
+SELECT task_id, task_name FROM task WHERE project_id IS NULL ORDER BY task_id;
+
+DROP TABLE task;
+DROP TABLE project;
+
+--echo #
+--echo # Test 4: Mixed CASCADE and RESTRICT
+--echo #
+CREATE TABLE account (
+  account_id INT PRIMARY KEY,
+  account_name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE transaction_log (
+  log_id INT PRIMARY KEY,
+  account_id INT,
+  amount DECIMAL(10,2),
+  FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE RESTRICT
+) ENGINE=KVT;
+
+CREATE TABLE account_settings (
+  setting_id INT PRIMARY KEY,
+  account_id INT,
+  setting_value VARCHAR(100),
+  FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+) ENGINE=KVT;
+
+INSERT INTO account VALUES (1, 'Checking');
+INSERT INTO account VALUES (2, 'Savings');
+
+INSERT INTO transaction_log VALUES (1001, 1, 100.00);
+INSERT INTO transaction_log VALUES (1002, 1, -50.00);
+INSERT INTO transaction_log VALUES (1003, 2, 200.00);
+
+INSERT INTO account_settings VALUES (1, 1, 'email_alerts=true');
+INSERT INTO account_settings VALUES (2, 1, 'overdraft=false');
+INSERT INTO account_settings VALUES (3, 2, 'email_alerts=false');
+
+--echo # Try to delete account 1 (should fail due to RESTRICT on transaction_log)
+--error ER_ROW_IS_REFERENCED_2
+DELETE FROM account WHERE account_id = 1;
+
+--echo # Delete transactions first
+DELETE FROM transaction_log WHERE account_id = 1;
+
+--echo # Now delete account 1 (should cascade delete settings)
+DELETE FROM account WHERE account_id = 1;
+
+SELECT * FROM account ORDER BY account_id;
+SELECT * FROM account_settings ORDER BY setting_id;
+SELECT * FROM transaction_log ORDER BY log_id;
+
+DROP TABLE account_settings;
+DROP TABLE transaction_log;
+DROP TABLE account;
+
+--echo #
+--echo # Test 5: Multi-level CASCADE
+--echo #
+CREATE TABLE grandparent (
+  gp_id INT PRIMARY KEY,
+  gp_name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE parent (
+  p_id INT PRIMARY KEY,
+  gp_id INT,
+  p_name VARCHAR(50),
+  FOREIGN KEY (gp_id) REFERENCES grandparent(gp_id) ON DELETE CASCADE
+) ENGINE=KVT;
+
+CREATE TABLE child (
+  c_id INT PRIMARY KEY,
+  p_id INT,
+  c_name VARCHAR(50),
+  FOREIGN KEY (p_id) REFERENCES parent(p_id) ON DELETE CASCADE
+) ENGINE=KVT;
+
+INSERT INTO grandparent VALUES (1, 'GP1');
+INSERT INTO grandparent VALUES (2, 'GP2');
+
+INSERT INTO parent VALUES (10, 1, 'P1-1');
+INSERT INTO parent VALUES (11, 1, 'P1-2');
+INSERT INTO parent VALUES (20, 2, 'P2-1');
+
+INSERT INTO child VALUES (100, 10, 'C10-1');
+INSERT INTO child VALUES (101, 10, 'C10-2');
+INSERT INTO child VALUES (110, 11, 'C11-1');
+INSERT INTO child VALUES (200, 20, 'C20-1');
+
+--echo # Delete grandparent 1 (should cascade through all levels)
+DELETE FROM grandparent WHERE gp_id = 1;
+
+SELECT * FROM grandparent ORDER BY gp_id;
+SELECT * FROM parent ORDER BY p_id;
+SELECT * FROM child ORDER BY c_id;
+
+DROP TABLE child;
+DROP TABLE parent;
+DROP TABLE grandparent;
+
+--echo #
+--echo # Test 6: SET NULL with multi-column FK
+--echo #
+CREATE TABLE location (
+  country VARCHAR(50),
+  city VARCHAR(50),
+  location_name VARCHAR(100),
+  PRIMARY KEY (country, city)
+) ENGINE=KVT;
+
+CREATE TABLE office (
+  office_id INT PRIMARY KEY,
+  country VARCHAR(50),
+  city VARCHAR(50),
+  office_name VARCHAR(100),
+  FOREIGN KEY (country, city) REFERENCES location(country, city) ON DELETE SET NULL
+) ENGINE=KVT;
+
+INSERT INTO location VALUES ('USA', 'NYC', 'New York City');
+INSERT INTO location VALUES ('USA', 'SF', 'San Francisco');
+INSERT INTO location VALUES ('UK', 'LON', 'London');
+
+INSERT INTO office VALUES (1, 'USA', 'NYC', 'Headquarters');
+INSERT INTO office VALUES (2, 'USA', 'SF', 'West Coast Office');
+INSERT INTO office VALUES (3, 'UK', 'LON', 'European Office');
+INSERT INTO office VALUES (4, NULL, NULL, 'Virtual Office');
+
+--echo # Delete location USA/NYC (should set office 1's location to NULL)
+DELETE FROM location WHERE country = 'USA' AND city = 'NYC';
+
+SELECT * FROM office ORDER BY office_id;
+
+--echo # Verify partial NULL not allowed
+--error ER_NO_REFERENCED_ROW_2
+UPDATE office SET country = 'USA', city = NULL WHERE office_id = 4;
+
+DROP TABLE office;
+DROP TABLE location;
+
+--echo # Cleanup
+DROP DATABASE test_kvt_fk_cascade;

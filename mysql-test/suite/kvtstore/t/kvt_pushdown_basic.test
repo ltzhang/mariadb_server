@@ -1,0 +1,166 @@
+--source include/have_partition.inc
+
+--echo #
+--echo # Test basic condition pushdown optimization
+--echo #
+
+# Load the KVT plugin if not already loaded
+--disable_query_log
+--error 0,ER_CANT_INITIALIZE_UDF
+INSTALL PLUGIN kvt SONAME 'ha_kvt.so';
+--enable_query_log
+
+--echo # Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_pushdown;
+USE test_kvt_pushdown;
+
+--echo #
+--echo # Test 1: Simple equality conditions
+--echo #
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  age INT,
+  city VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t1 VALUES 
+  (1, 'Alice', 25, 'New York'),
+  (2, 'Bob', 30, 'London'),
+  (3, 'Charlie', 35, 'Paris'),
+  (4, 'David', 28, 'Tokyo'),
+  (5, 'Eve', 32, 'Sydney');
+
+--echo # Simple equality pushdown
+SELECT * FROM t1 WHERE id = 3;
+SELECT * FROM t1 WHERE name = 'Bob';
+SELECT * FROM t1 WHERE age = 30;
+SELECT * FROM t1 WHERE city = 'Paris';
+
+--echo # Multiple conditions with AND
+SELECT * FROM t1 WHERE age > 25 AND city = 'London';
+SELECT * FROM t1 WHERE id >= 2 AND id <= 4;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Test 2: Comparison operators
+--echo #
+CREATE TABLE t2 (
+  id INT PRIMARY KEY,
+  value INT,
+  score DECIMAL(5,2)
+) ENGINE=KVT;
+
+INSERT INTO t2 VALUES 
+  (1, 100, 85.50),
+  (2, 200, 92.75),
+  (3, 150, 78.25),
+  (4, 300, 95.00),
+  (5, 250, 88.50);
+
+--echo # Less than
+SELECT * FROM t2 WHERE value < 200;
+
+--echo # Greater than
+SELECT * FROM t2 WHERE score > 90.00;
+
+--echo # Less than or equal
+SELECT * FROM t2 WHERE value <= 150;
+
+--echo # Greater than or equal
+SELECT * FROM t2 WHERE score >= 85.00;
+
+--echo # Not equal
+SELECT * FROM t2 WHERE value != 200;
+
+DROP TABLE t2;
+
+--echo #
+--echo # Test 3: NULL handling
+--echo #
+CREATE TABLE t3 (
+  id INT PRIMARY KEY,
+  nullable_col VARCHAR(50),
+  value INT
+) ENGINE=KVT;
+
+INSERT INTO t3 VALUES 
+  (1, 'data1', 100),
+  (2, NULL, 200),
+  (3, 'data3', NULL),
+  (4, NULL, NULL),
+  (5, 'data5', 500);
+
+--echo # IS NULL condition
+SELECT * FROM t3 WHERE nullable_col IS NULL;
+SELECT * FROM t3 WHERE value IS NULL;
+
+--echo # IS NOT NULL condition
+SELECT * FROM t3 WHERE nullable_col IS NOT NULL;
+SELECT * FROM t3 WHERE value IS NOT NULL;
+
+--echo # Combination with other conditions
+SELECT * FROM t3 WHERE nullable_col IS NOT NULL AND value > 100;
+
+DROP TABLE t3;
+
+--echo #
+--echo # Test 4: Type conversion in conditions
+--echo #
+CREATE TABLE t4 (
+  id INT PRIMARY KEY,
+  int_col INT,
+  str_col VARCHAR(50),
+  date_col DATE
+) ENGINE=KVT;
+
+INSERT INTO t4 VALUES 
+  (1, 100, '100', '2024-01-01'),
+  (2, 200, '200', '2024-02-01'),
+  (3, 300, '300', '2024-03-01');
+
+--echo # Numeric comparison with string column
+SELECT * FROM t4 WHERE str_col = '200';
+
+--echo # String comparison with numeric column
+SELECT * FROM t4 WHERE int_col = 200;
+
+--echo # Date comparisons
+SELECT * FROM t4 WHERE date_col > '2024-01-15';
+SELECT * FROM t4 WHERE date_col BETWEEN '2024-01-01' AND '2024-02-28';
+
+DROP TABLE t4;
+
+--echo #
+--echo # Test 5: Complex conditions (AND/OR)
+--echo #
+CREATE TABLE t5 (
+  id INT PRIMARY KEY,
+  category VARCHAR(20),
+  status VARCHAR(20),
+  priority INT
+) ENGINE=KVT;
+
+INSERT INTO t5 VALUES 
+  (1, 'A', 'active', 1),
+  (2, 'B', 'inactive', 2),
+  (3, 'A', 'active', 3),
+  (4, 'C', 'pending', 1),
+  (5, 'B', 'active', 2);
+
+--echo # AND conditions
+SELECT * FROM t5 WHERE category = 'A' AND status = 'active';
+SELECT * FROM t5 WHERE priority > 1 AND status != 'inactive';
+
+--echo # OR conditions (may not push down)
+SELECT * FROM t5 WHERE category = 'A' OR category = 'B';
+SELECT * FROM t5 WHERE status = 'active' OR priority = 1;
+
+--echo # Mixed AND/OR
+SELECT * FROM t5 WHERE (category = 'A' OR category = 'B') AND status = 'active';
+
+DROP TABLE t5;
+
+--echo # Cleanup
+DROP DATABASE test_kvt_pushdown;

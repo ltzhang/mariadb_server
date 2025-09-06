@@ -1,0 +1,257 @@
+#
+# Test CASCADE and SET NULL foreign key actions
+#
+# Create database and use it
+CREATE DATABASE IF NOT EXISTS test_kvt_fk_cascade;
+USE test_kvt_fk_cascade;
+#
+# Test 1: CASCADE DELETE
+#
+CREATE TABLE department (
+dept_id INT PRIMARY KEY,
+dept_name VARCHAR(50)
+) ENGINE=KVT;
+CREATE TABLE employee (
+emp_id INT PRIMARY KEY,
+dept_id INT,
+emp_name VARCHAR(50),
+FOREIGN KEY (dept_id) REFERENCES department(dept_id) ON DELETE CASCADE
+) ENGINE=KVT;
+# Insert departments
+INSERT INTO department VALUES (1, 'Engineering');
+INSERT INTO department VALUES (2, 'Sales');
+INSERT INTO department VALUES (3, 'Marketing');
+# Insert employees
+INSERT INTO employee VALUES (101, 1, 'Alice');
+INSERT INTO employee VALUES (102, 1, 'Bob');
+INSERT INTO employee VALUES (103, 2, 'Charlie');
+INSERT INTO employee VALUES (104, 2, 'David');
+INSERT INTO employee VALUES (105, 3, 'Eve');
+# Delete department 1 (should cascade delete Alice and Bob)
+DELETE FROM department WHERE dept_id = 1;
+# Verify cascaded deletes
+SELECT * FROM department ORDER BY dept_id;
+dept_id	dept_name
+2	Sales
+3	Marketing
+SELECT * FROM employee ORDER BY emp_id;
+emp_id	dept_id	emp_name
+103	2	Charlie
+104	2	David
+105	3	Eve
+# Delete department 2 (should cascade delete Charlie and David)
+DELETE FROM department WHERE dept_id = 2;
+SELECT * FROM employee ORDER BY emp_id;
+emp_id	dept_id	emp_name
+105	3	Eve
+DROP TABLE employee;
+DROP TABLE department;
+#
+# Test 2: CASCADE UPDATE
+#
+CREATE TABLE country (
+country_code CHAR(2) PRIMARY KEY,
+country_name VARCHAR(50)
+) ENGINE=KVT;
+CREATE TABLE city (
+city_id INT PRIMARY KEY,
+country_code CHAR(2),
+city_name VARCHAR(50),
+FOREIGN KEY (country_code) REFERENCES country(country_code) ON UPDATE CASCADE
+) ENGINE=KVT;
+INSERT INTO country VALUES ('US', 'United States');
+INSERT INTO country VALUES ('UK', 'United Kingdom');
+INSERT INTO country VALUES ('FR', 'France');
+INSERT INTO city VALUES (1, 'US', 'New York');
+INSERT INTO city VALUES (2, 'US', 'Los Angeles');
+INSERT INTO city VALUES (3, 'UK', 'London');
+INSERT INTO city VALUES (4, 'FR', 'Paris');
+# Update country code (should cascade to cities)
+UPDATE country SET country_code = 'GB' WHERE country_code = 'UK';
+SELECT * FROM country ORDER BY country_code;
+country_code	country_name
+FR	France
+GB	United Kingdom
+US	United States
+SELECT * FROM city ORDER BY city_id;
+city_id	country_code	city_name
+1	US	New York
+2	US	Los Angeles
+3	GB	London
+4	FR	Paris
+# Verify foreign key still works after cascade
+INSERT INTO city VALUES (5, 'UK', 'Manchester');
+ERROR 23000: Cannot add or update a child row: a foreign key constraint fails
+INSERT INTO city VALUES (5, 'GB', 'Manchester');
+SELECT * FROM city WHERE country_code = 'GB' ORDER BY city_id;
+city_id	country_code	city_name
+3	GB	London
+5	GB	Manchester
+DROP TABLE city;
+DROP TABLE country;
+#
+# Test 3: SET NULL on DELETE
+#
+CREATE TABLE project (
+project_id INT PRIMARY KEY,
+project_name VARCHAR(50)
+) ENGINE=KVT;
+CREATE TABLE task (
+task_id INT PRIMARY KEY,
+project_id INT,
+task_name VARCHAR(50),
+FOREIGN KEY (project_id) REFERENCES project(project_id) ON DELETE SET NULL
+) ENGINE=KVT;
+INSERT INTO project VALUES (1, 'Website Redesign');
+INSERT INTO project VALUES (2, 'Mobile App');
+INSERT INTO project VALUES (3, 'Database Migration');
+INSERT INTO task VALUES (101, 1, 'Design mockups');
+INSERT INTO task VALUES (102, 1, 'Frontend development');
+INSERT INTO task VALUES (103, 2, 'iOS development');
+INSERT INTO task VALUES (104, 2, 'Android development');
+INSERT INTO task VALUES (105, 3, 'Schema design');
+INSERT INTO task VALUES (106, NULL, 'Research task');
+# Delete project 1 (should set tasks' project_id to NULL)
+DELETE FROM project WHERE project_id = 1;
+SELECT * FROM task ORDER BY task_id;
+task_id	project_id	task_name
+101	NULL	Design mockups
+102	NULL	Frontend development
+103	2	iOS development
+104	2	Android development
+105	3	Schema design
+106	NULL	Research task
+# Verify NULL project_id tasks
+SELECT task_id, task_name FROM task WHERE project_id IS NULL ORDER BY task_id;
+task_id	task_name
+101	Design mockups
+102	Frontend development
+106	Research task
+DROP TABLE task;
+DROP TABLE project;
+#
+# Test 4: Mixed CASCADE and RESTRICT
+#
+CREATE TABLE account (
+account_id INT PRIMARY KEY,
+account_name VARCHAR(50)
+) ENGINE=KVT;
+CREATE TABLE transaction_log (
+log_id INT PRIMARY KEY,
+account_id INT,
+amount DECIMAL(10,2),
+FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE RESTRICT
+) ENGINE=KVT;
+CREATE TABLE account_settings (
+setting_id INT PRIMARY KEY,
+account_id INT,
+setting_value VARCHAR(100),
+FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+) ENGINE=KVT;
+INSERT INTO account VALUES (1, 'Checking');
+INSERT INTO account VALUES (2, 'Savings');
+INSERT INTO transaction_log VALUES (1001, 1, 100.00);
+INSERT INTO transaction_log VALUES (1002, 1, -50.00);
+INSERT INTO transaction_log VALUES (1003, 2, 200.00);
+INSERT INTO account_settings VALUES (1, 1, 'email_alerts=true');
+INSERT INTO account_settings VALUES (2, 1, 'overdraft=false');
+INSERT INTO account_settings VALUES (3, 2, 'email_alerts=false');
+# Try to delete account 1 (should fail due to RESTRICT on transaction_log)
+DELETE FROM account WHERE account_id = 1;
+ERROR 23000: Cannot delete or update a parent row: a foreign key constraint fails
+# Delete transactions first
+DELETE FROM transaction_log WHERE account_id = 1;
+# Now delete account 1 (should cascade delete settings)
+DELETE FROM account WHERE account_id = 1;
+SELECT * FROM account ORDER BY account_id;
+account_id	account_name
+2	Savings
+SELECT * FROM account_settings ORDER BY setting_id;
+setting_id	account_id	setting_value
+3	2	email_alerts=false
+SELECT * FROM transaction_log ORDER BY log_id;
+log_id	account_id	amount
+1003	2	200.00
+DROP TABLE account_settings;
+DROP TABLE transaction_log;
+DROP TABLE account;
+#
+# Test 5: Multi-level CASCADE
+#
+CREATE TABLE grandparent (
+gp_id INT PRIMARY KEY,
+gp_name VARCHAR(50)
+) ENGINE=KVT;
+CREATE TABLE parent (
+p_id INT PRIMARY KEY,
+gp_id INT,
+p_name VARCHAR(50),
+FOREIGN KEY (gp_id) REFERENCES grandparent(gp_id) ON DELETE CASCADE
+) ENGINE=KVT;
+CREATE TABLE child (
+c_id INT PRIMARY KEY,
+p_id INT,
+c_name VARCHAR(50),
+FOREIGN KEY (p_id) REFERENCES parent(p_id) ON DELETE CASCADE
+) ENGINE=KVT;
+INSERT INTO grandparent VALUES (1, 'GP1');
+INSERT INTO grandparent VALUES (2, 'GP2');
+INSERT INTO parent VALUES (10, 1, 'P1-1');
+INSERT INTO parent VALUES (11, 1, 'P1-2');
+INSERT INTO parent VALUES (20, 2, 'P2-1');
+INSERT INTO child VALUES (100, 10, 'C10-1');
+INSERT INTO child VALUES (101, 10, 'C10-2');
+INSERT INTO child VALUES (110, 11, 'C11-1');
+INSERT INTO child VALUES (200, 20, 'C20-1');
+# Delete grandparent 1 (should cascade through all levels)
+DELETE FROM grandparent WHERE gp_id = 1;
+SELECT * FROM grandparent ORDER BY gp_id;
+gp_id	gp_name
+2	GP2
+SELECT * FROM parent ORDER BY p_id;
+p_id	gp_id	p_name
+20	2	P2-1
+SELECT * FROM child ORDER BY c_id;
+c_id	p_id	c_name
+200	20	C20-1
+DROP TABLE child;
+DROP TABLE parent;
+DROP TABLE grandparent;
+#
+# Test 6: SET NULL with multi-column FK
+#
+CREATE TABLE location (
+country VARCHAR(50),
+city VARCHAR(50),
+location_name VARCHAR(100),
+PRIMARY KEY (country, city)
+) ENGINE=KVT;
+CREATE TABLE office (
+office_id INT PRIMARY KEY,
+country VARCHAR(50),
+city VARCHAR(50),
+office_name VARCHAR(100),
+FOREIGN KEY (country, city) REFERENCES location(country, city) ON DELETE SET NULL
+) ENGINE=KVT;
+INSERT INTO location VALUES ('USA', 'NYC', 'New York City');
+INSERT INTO location VALUES ('USA', 'SF', 'San Francisco');
+INSERT INTO location VALUES ('UK', 'LON', 'London');
+INSERT INTO office VALUES (1, 'USA', 'NYC', 'Headquarters');
+INSERT INTO office VALUES (2, 'USA', 'SF', 'West Coast Office');
+INSERT INTO office VALUES (3, 'UK', 'LON', 'European Office');
+INSERT INTO office VALUES (4, NULL, NULL, 'Virtual Office');
+# Delete location USA/NYC (should set office 1's location to NULL)
+DELETE FROM location WHERE country = 'USA' AND city = 'NYC';
+SELECT * FROM office ORDER BY office_id;
+office_id	country	city	office_name
+1	NULL	NULL	Headquarters
+2	USA	SF	West Coast Office
+3	UK	LON	European Office
+4	NULL	NULL	Virtual Office
+# Verify partial NULL not allowed
+UPDATE office SET country = 'USA', city = NULL WHERE office_id = 4;
+ERROR 23000: Cannot add or update a child row: a foreign key constraint fails
+DROP TABLE office;
+DROP TABLE location;
+# Cleanup
+DROP DATABASE test_kvt_fk_cascade;
