@@ -30,6 +30,7 @@
 #include "kvt_spatial_adapter.h"
 #include "kvt_statistics.h"
 #include "kvt_composite_index.h"
+#include "kvt_index_only_scan.h"
 
 // Key algorithm and flag definitions for indexes
 #ifndef HA_SPATIAL_INDEX
@@ -346,7 +347,11 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     in_range_scan(false),
     range_eq_flag(false),
     range_sorted(false),
-    range_scan_position(0)
+    range_scan_position(0),
+    index_only_scan_active(false),
+    covering_index_id(MAX_KEY),
+    covered_columns_bitmap(nullptr),
+    covered_columns_buf(nullptr)
 {
 }
 
@@ -633,8 +638,29 @@ int ha_kvt::write_row(const uchar *buf)
     std::string index_key = kvt_composite::build_composite_key_from_record(
         kvt_data_table_id, i, key_info, buf, row_id);
     
-    // Store index entry (key -> row_id)
-    std::string index_value = std::to_string(row_id);
+    // Build index value with covered columns if appropriate
+    std::string index_value;
+    kvt_index_only::IndexOnlyConfig config;
+    if (kvt_index_only::should_store_covered_columns(key_info, table, config)) {
+      // Get covered columns for this index
+      MY_BITMAP* covered_cols = kvt_index_only::get_covered_columns_for_index(
+          table, key_info, config);
+      
+      // Encode index value with covered columns
+      index_value = kvt_index_only::encode_index_value_with_covered_columns(
+          row_id, buf, table, covered_cols);
+      
+      // Clean up bitmap
+      if (covered_cols) {
+        bitmap_free(covered_cols);
+        free(covered_cols->bitmap);
+        free(covered_cols);
+      }
+    } else {
+      // Simple index value (just row_id)
+      index_value = std::to_string(row_id);
+    }
+    
     KVTError idx_err = kvt_set(kvt_tx_id, kvt_data_table_id, 
                                index_key, index_value, error_msg);
     if (idx_err != KVTError::SUCCESS) {
@@ -1025,8 +1051,40 @@ int ha_kvt::index_read_map(uchar *buf, const uchar *key,
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   }
   
-  // Get the row_id from the index value
-  uint64_t row_id = std::stoull(index_scan_results[0].value);
+  // Check if we can use index-only scan
+  if (index_only_scan_active && covered_columns_bitmap) {
+    // Try to decode covered columns from index value
+    uint64_t row_id;
+    int ret = kvt_index_only::decode_covered_columns_from_index_value(
+        index_scan_results[0].value, row_id, buf, table,
+        covered_columns_bitmap, table->read_set);
+    
+    if (ret == 0) {
+      // Successfully decoded from index
+      std::string row_key = row_codec->encode_rowid(row_id);
+      current_position_key = generate_data_key(row_key);
+      index_scan_position++;
+      DBUG_PRINT("info", ("Index-only scan: returned row from index"));
+      DBUG_RETURN(0);
+    } else if (ret == HA_ERR_KEY_NOT_FOUND) {
+      // Need to fetch some columns from row data
+      DBUG_PRINT("info", ("Index-only scan: need row fetch for some columns"));
+      // Fall through to regular row fetch
+    }
+  }
+  
+  // Regular path: fetch row data
+  uint64_t row_id;
+  // Check if value contains covered columns
+  if (index_scan_results[0].value.length() >= 8) {
+    // Extract row_id from beginning of value
+    uint64_t be_row_id;
+    std::memcpy(&be_row_id, index_scan_results[0].value.data(), sizeof(be_row_id));
+    row_id = be64toh(be_row_id);
+  } else {
+    // Old format: just row_id as string
+    row_id = std::stoull(index_scan_results[0].value);
+  }
   
   // Fetch the actual row data
   std::string row_key = row_codec->encode_rowid(row_id);
@@ -1059,8 +1117,38 @@ int ha_kvt::index_next(uchar *buf)
   
   // Continue with index scan results
   while (index_scan_position < index_scan_results.size()) {
-    // Get the row_id from the index value
-    uint64_t row_id = std::stoull(index_scan_results[index_scan_position].value);
+    // Check if we can use index-only scan
+    if (index_only_scan_active && covered_columns_bitmap) {
+      // Try to decode covered columns from index value
+      uint64_t row_id;
+      int ret = kvt_index_only::decode_covered_columns_from_index_value(
+          index_scan_results[index_scan_position].value, row_id, buf, table,
+          covered_columns_bitmap, table->read_set);
+      
+      if (ret == 0) {
+        // Successfully decoded from index
+        std::string row_key = row_codec->encode_rowid(row_id);
+        current_position_key = generate_data_key(row_key);
+        index_scan_position++;
+        DBUG_PRINT("info", ("Index-only scan: returned row from index"));
+        DBUG_RETURN(0);
+      }
+      // If ret != 0, fall through to regular row fetch
+    }
+    
+    // Regular path: extract row_id and fetch row
+    uint64_t row_id;
+    // Check if value contains covered columns
+    if (index_scan_results[index_scan_position].value.length() >= 8) {
+      // Extract row_id from beginning of value
+      uint64_t be_row_id;
+      std::memcpy(&be_row_id, index_scan_results[index_scan_position].value.data(), 
+                  sizeof(be_row_id));
+      row_id = be64toh(be_row_id);
+    } else {
+      // Old format: just row_id as string
+      row_id = std::stoull(index_scan_results[index_scan_position].value);
+    }
     
     // Fetch the actual row data
     std::string row_key = row_codec->encode_rowid(row_id);
@@ -2051,6 +2139,102 @@ void ha_kvt::cond_pop()
   DBUG_ENTER("ha_kvt::cond_pop");
   pushed_cond = nullptr;
   DBUG_VOID_RETURN;
+}
+
+int ha_kvt::extra(enum ha_extra_function operation)
+{
+  DBUG_ENTER("ha_kvt::extra");
+  
+  switch (operation) {
+    case HA_EXTRA_KEYREAD:
+      // Enable index-only scan if possible
+      if (active_index != MAX_KEY) {
+        // Check if we can use index-only scan
+        if (kvt_index_only::can_use_index_only_scan(
+            table, active_index, table->read_set, &table->key_info[active_index])) {
+          index_only_scan_active = true;
+          covering_index_id = active_index;
+          
+          // Create covered columns bitmap
+          kvt_index_only::IndexOnlyConfig config;
+          covered_columns_bitmap = kvt_index_only::get_covered_columns_for_index(
+              table, &table->key_info[active_index], config);
+          
+          DBUG_PRINT("info", ("Index-only scan enabled for index %u", active_index));
+        }
+      }
+      break;
+      
+    case HA_EXTRA_NO_KEYREAD:
+      // Disable index-only scan
+      if (index_only_scan_active) {
+        index_only_scan_active = false;
+        covering_index_id = MAX_KEY;
+        
+        // Clean up covered columns bitmap
+        if (covered_columns_bitmap) {
+          bitmap_free(covered_columns_bitmap);
+          if (covered_columns_bitmap->bitmap) {
+            free(covered_columns_bitmap->bitmap);
+          }
+          free(covered_columns_bitmap);
+          covered_columns_bitmap = nullptr;
+        }
+        
+        DBUG_PRINT("info", ("Index-only scan disabled"));
+      }
+      break;
+      
+    case HA_EXTRA_RESET_STATE:
+      // Reset all state
+      index_only_scan_active = false;
+      covering_index_id = MAX_KEY;
+      if (covered_columns_bitmap) {
+        bitmap_free(covered_columns_bitmap);
+        if (covered_columns_bitmap->bitmap) {
+          free(covered_columns_bitmap->bitmap);
+        }
+        free(covered_columns_bitmap);
+        covered_columns_bitmap = nullptr;
+      }
+      break;
+      
+    default:
+      // Ignore other operations
+      break;
+  }
+  
+  DBUG_RETURN(0);
+}
+
+ulong ha_kvt::index_flags(uint idx, uint part, bool all_parts) const
+{
+  DBUG_ENTER("ha_kvt::index_flags");
+  
+  ulong flags = 0;
+  
+  if (idx < table_share->keys) {
+    KEY* key_info = &table->key_info[idx];
+    
+    // Basic index capabilities
+    flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE;
+    
+    // Support for keyread (index-only scan)
+    flags |= HA_KEYREAD_ONLY;
+    
+    // Primary key and unique indexes have special properties
+    if ((key_info->flags & HA_NOSAME) || idx == table_share->primary_key) {
+      flags |= HA_KEYREAD_ONLY | HA_READ_ORDER;
+    }
+    
+    // Don't support keyread for special index types
+    if (key_info->algorithm == HA_KEY_ALG_FULLTEXT ||
+        (key_info->flags & HA_SPATIAL_INDEX)) {
+      flags &= ~HA_KEYREAD_ONLY;
+    }
+  }
+  
+  DBUG_RETURN(flags);
 }
 
 bool ha_kvt::check_pushed_condition(const uchar *buf)

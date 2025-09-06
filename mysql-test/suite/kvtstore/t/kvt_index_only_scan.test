@@ -1,0 +1,112 @@
+# Test index-only scan (covering index) functionality in KVT storage engine
+
+--source include/have_kvt.inc
+
+--echo # Test 1: Create table with potential covering indexes
+CREATE TABLE t1 (
+    id INT PRIMARY KEY,
+    customer_id INT,
+    order_date DATE,
+    amount DECIMAL(10,2),
+    status VARCHAR(20),
+    description TEXT,
+    INDEX idx_customer (customer_id, order_date, amount),
+    INDEX idx_date (order_date, customer_id),
+    INDEX idx_status (status)
+) ENGINE=KVT;
+
+--echo # Test 2: Insert test data
+INSERT INTO t1 VALUES 
+    (1, 100, '2025-01-01', 500.00, 'completed', 'Order 1 description'),
+    (2, 100, '2025-01-02', 750.00, 'pending', 'Order 2 description'),
+    (3, 101, '2025-01-03', 300.00, 'completed', 'Order 3 description'),
+    (4, 101, '2025-01-04', 450.00, 'cancelled', 'Order 4 description'),
+    (5, 102, '2025-01-05', 600.00, 'completed', 'Order 5 description'),
+    (6, 102, '2025-01-06', 800.00, 'pending', 'Order 6 description'),
+    (7, 103, '2025-01-07', 250.00, 'completed', 'Order 7 description'),
+    (8, 103, '2025-01-08', 900.00, 'pending', 'Order 8 description'),
+    (9, 104, '2025-01-09', 150.00, 'cancelled', 'Order 9 description'),
+    (10, 104, '2025-01-10', 1000.00, 'completed', 'Order 10 description');
+
+--echo # Test 3: Query using only indexed columns (should use index-only scan)
+EXPLAIN SELECT customer_id, order_date, amount FROM t1 WHERE customer_id = 100;
+SELECT customer_id, order_date, amount FROM t1 WHERE customer_id = 100;
+
+--echo # Test 4: Query with all columns from covering index
+EXPLAIN SELECT customer_id, order_date, amount FROM t1 WHERE customer_id BETWEEN 101 AND 102 ORDER BY customer_id, order_date;
+SELECT customer_id, order_date, amount FROM t1 WHERE customer_id BETWEEN 101 AND 102 ORDER BY customer_id, order_date;
+
+--echo # Test 5: Aggregation using only indexed columns
+EXPLAIN SELECT customer_id, COUNT(*), SUM(amount), MAX(order_date) FROM t1 GROUP BY customer_id;
+SELECT customer_id, COUNT(*), SUM(amount), MAX(order_date) FROM t1 GROUP BY customer_id;
+
+--echo # Test 6: Query that needs row fetch (includes non-indexed column)
+EXPLAIN SELECT customer_id, order_date, amount, description FROM t1 WHERE customer_id = 100;
+SELECT customer_id, order_date, amount, description FROM t1 WHERE customer_id = 100;
+
+--echo # Test 7: Primary key index-only scan
+EXPLAIN SELECT id FROM t1 WHERE id BETWEEN 3 AND 7;
+SELECT id FROM t1 WHERE id BETWEEN 3 AND 7;
+
+--echo # Test 8: COUNT(*) optimization
+EXPLAIN SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1;
+
+EXPLAIN SELECT COUNT(*) FROM t1 WHERE customer_id = 100;
+SELECT COUNT(*) FROM t1 WHERE customer_id = 100;
+
+--echo # Test 9: MIN/MAX optimization with covering index
+EXPLAIN SELECT MIN(amount), MAX(amount) FROM t1 WHERE customer_id = 100;
+SELECT MIN(amount), MAX(amount) FROM t1 WHERE customer_id = 100;
+
+--echo # Test 10: Check handler status to verify index-only scans
+FLUSH STATUS;
+SELECT customer_id, order_date, amount FROM t1 WHERE customer_id = 100;
+SHOW STATUS LIKE 'Handler_read%';
+
+--echo # Test 11: Force index usage
+SELECT customer_id, order_date, amount FROM t1 FORCE INDEX (idx_customer) WHERE customer_id = 100;
+
+--echo # Test 12: Multi-column index with partial match
+SELECT order_date, customer_id FROM t1 WHERE order_date = '2025-01-05';
+
+--echo # Test 13: Create table with INCLUDE columns (if supported)
+CREATE TABLE t2 (
+    id INT PRIMARY KEY,
+    col1 INT,
+    col2 VARCHAR(20),
+    col3 DATE,
+    col4 TEXT,
+    INDEX idx_covering (col1, col2) 
+    -- Note: INCLUDE syntax may not be supported, using regular composite index
+) ENGINE=KVT;
+
+INSERT INTO t2 VALUES 
+    (1, 10, 'abc', '2025-01-01', 'text1'),
+    (2, 20, 'def', '2025-01-02', 'text2'),
+    (3, 10, 'ghi', '2025-01-03', 'text3');
+
+--echo # Test 14: Verify covering index on second table
+EXPLAIN SELECT col1, col2 FROM t2 WHERE col1 = 10;
+SELECT col1, col2 FROM t2 WHERE col1 = 10;
+
+--echo # Test 15: NULL handling in covering index
+CREATE TABLE t3 (
+    id INT PRIMARY KEY,
+    a INT,
+    b VARCHAR(10),
+    c DATE,
+    INDEX idx_abc (a, b, c)
+) ENGINE=KVT;
+
+INSERT INTO t3 VALUES 
+    (1, 10, 'x', '2025-01-01'),
+    (2, 10, NULL, '2025-01-02'),
+    (3, NULL, 'y', '2025-01-03'),
+    (4, 20, 'z', NULL);
+
+SELECT a, b, c FROM t3 WHERE a = 10 ORDER BY b, c;
+SELECT a, b, c FROM t3 WHERE a IS NULL;
+
+--echo # Test 16: Cleanup
+DROP TABLE t1, t2, t3;

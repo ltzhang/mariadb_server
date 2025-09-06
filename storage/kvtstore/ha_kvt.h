@@ -152,6 +152,10 @@ public:
   const COND *cond_push(const COND *cond) override;
   void cond_pop() override;
   
+  // Index-only scan support
+  int extra(enum ha_extra_function operation) override;
+  ulong index_flags(uint idx, uint part, bool all_parts) const override;
+  
   // Full-text search support
   FT_INFO *ft_init_ext(uint flags, uint inx, String *key) override;
   int ft_read(uchar *buf) override;
@@ -208,6 +212,12 @@ private:
   std::string index_scan_end_key;
   std::vector<std::pair<std::string, std::string>> index_scan_results;
   size_t index_scan_position;
+  
+  // Index-only scan state
+  bool index_only_scan_active;
+  uint covering_index_id;
+  MY_BITMAP* covered_columns_bitmap;
+  void* covered_columns_buf;
   
   // Error tracking
   uint last_error_key;
