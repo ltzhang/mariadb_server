@@ -31,6 +31,7 @@
 #include "kvt_statistics.h"
 #include "kvt_composite_index.h"
 #include "kvt_index_only_scan.h"
+#include "kvt_unique_constraint.h"
 
 // Key algorithm and flag definitions for indexes
 #ifndef HA_SPATIAL_INDEX
@@ -344,6 +345,7 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     index_sorted(false),
     index_scan_position(0),
     last_error_key(0),
+    last_dup_key(0),
     in_range_scan(false),
     range_eq_flag(false),
     range_sorted(false),
@@ -481,6 +483,20 @@ int ha_kvt::write_row(const uchar *buf)
   
   if (!row_codec || kvt_data_table_id == 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  // Check unique constraints
+  auto* unique_mgr = kvt_unique::KVTUniqueConstraintManager::get_instance();
+  kvt_unique::UniqueCheckResult unique_result = unique_mgr->check_unique_constraints(
+      table, buf, nullptr, kvt_tx_id, kvt_data_table_id);
+  
+  if (!unique_result.is_unique) {
+    // Set duplicate key error info
+    last_dup_key = unique_result.violated_index;
+    my_error(ER_DUP_ENTRY, MYF(0), 
+             unique_result.error_message.c_str(),
+             table->key_info[unique_result.violated_index].name.str);
+    DBUG_RETURN(HA_ERR_FOUND_DUPP_KEY);
   }
   
   // Check foreign key constraints
@@ -686,6 +702,20 @@ int ha_kvt::update_row(const uchar *old_data, const uchar *new_data)
   
   if (kvt_data_table_id == 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
+  }
+  
+  // Check unique constraints for update
+  auto* unique_mgr = kvt_unique::KVTUniqueConstraintManager::get_instance();
+  kvt_unique::UniqueCheckResult unique_result = unique_mgr->check_unique_constraints(
+      table, new_data, old_data, kvt_tx_id, kvt_data_table_id);
+  
+  if (!unique_result.is_unique) {
+    // Set duplicate key error info
+    last_dup_key = unique_result.violated_index;
+    my_error(ER_DUP_ENTRY, MYF(0), 
+             unique_result.error_message.c_str(),
+             table->key_info[unique_result.violated_index].name.str);
+    DBUG_RETURN(HA_ERR_FOUND_DUPP_KEY);
   }
   
   // Check foreign key constraints for update
@@ -1557,7 +1587,7 @@ int ha_kvt::info(uint flag)
   
   if (flag & HA_STATUS_ERRKEY) {
     // Error key information - set if there was an error on a specific key
-    errkey = last_error_key;
+    errkey = last_dup_key > 0 ? last_dup_key : last_error_key;
   }
   
   DBUG_RETURN(0);

@@ -221,6 +221,7 @@ private:
   
   // Error tracking
   uint last_error_key;
+  uint last_dup_key;  // Last duplicate key index for unique constraint violations
   
   // Range scan state
   bool in_range_scan;

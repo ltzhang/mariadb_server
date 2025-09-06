@@ -1,0 +1,167 @@
+# Test unique constraint functionality in KVT storage engine
+
+--source include/have_kvt.inc
+
+--echo # Test 1: Single column UNIQUE constraint
+CREATE TABLE t1 (
+    id INT PRIMARY KEY,
+    email VARCHAR(100) UNIQUE,
+    name VARCHAR(50)
+) ENGINE=KVT;
+
+--echo # Insert valid data
+INSERT INTO t1 VALUES (1, 'user1@example.com', 'User One');
+INSERT INTO t1 VALUES (2, 'user2@example.com', 'User Two');
+INSERT INTO t1 VALUES (3, 'user3@example.com', 'User Three');
+
+--echo # Test duplicate email (should fail)
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (4, 'user1@example.com', 'User Four');
+
+--echo # Test NULL handling (multiple NULLs should be allowed)
+INSERT INTO t1 VALUES (5, NULL, 'User Five');
+INSERT INTO t1 VALUES (6, NULL, 'User Six');
+SELECT id, email, name FROM t1 ORDER BY id;
+
+--echo # Test 2: Multi-column UNIQUE constraint
+CREATE TABLE t2 (
+    id INT PRIMARY KEY,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    age INT,
+    UNIQUE KEY uk_name (first_name, last_name)
+) ENGINE=KVT;
+
+--echo # Insert valid combinations
+INSERT INTO t2 VALUES (1, 'John', 'Doe', 30);
+INSERT INTO t2 VALUES (2, 'Jane', 'Doe', 25);
+INSERT INTO t2 VALUES (3, 'John', 'Smith', 35);
+INSERT INTO t2 VALUES (4, 'Jane', 'Smith', 28);
+
+--echo # Test duplicate name combination (should fail)
+--error ER_DUP_ENTRY
+INSERT INTO t2 VALUES (5, 'John', 'Doe', 40);
+
+--echo # Test partial NULL in composite unique
+INSERT INTO t2 VALUES (6, 'Alice', NULL, 22);
+INSERT INTO t2 VALUES (7, 'Alice', NULL, 25);  # Should succeed (NULL allows duplicates)
+INSERT INTO t2 VALUES (8, NULL, 'Brown', 30);
+INSERT INTO t2 VALUES (9, NULL, 'Brown', 35);  # Should succeed
+INSERT INTO t2 VALUES (10, NULL, NULL, 40);
+INSERT INTO t2 VALUES (11, NULL, NULL, 45);     # Should succeed
+
+SELECT id, first_name, last_name, age FROM t2 ORDER BY id;
+
+--echo # Test 3: UPDATE with unique constraints
+UPDATE t1 SET email = 'updated@example.com' WHERE id = 1;
+SELECT id, email FROM t1 WHERE id = 1;
+
+--echo # Update to duplicate value (should fail)
+--error ER_DUP_ENTRY
+UPDATE t1 SET email = 'user2@example.com' WHERE id = 1;
+
+--echo # Update same row (should succeed)
+UPDATE t1 SET email = 'updated@example.com', name = 'Updated User' WHERE id = 1;
+SELECT id, email, name FROM t1 WHERE id = 1;
+
+--echo # Test 4: PRIMARY KEY as unique constraint
+CREATE TABLE t3 (
+    id INT PRIMARY KEY,
+    data VARCHAR(100)
+) ENGINE=KVT;
+
+INSERT INTO t3 VALUES (1, 'Data 1');
+INSERT INTO t3 VALUES (2, 'Data 2');
+
+--echo # Duplicate primary key (should fail)
+--error ER_DUP_ENTRY
+INSERT INTO t3 VALUES (1, 'Data 3');
+
+--echo # Test 5: Multiple UNIQUE constraints on same table
+CREATE TABLE t4 (
+    id INT PRIMARY KEY,
+    username VARCHAR(50) UNIQUE,
+    email VARCHAR(100) UNIQUE,
+    phone VARCHAR(20) UNIQUE
+) ENGINE=KVT;
+
+INSERT INTO t4 VALUES (1, 'user1', 'user1@test.com', '111-111-1111');
+INSERT INTO t4 VALUES (2, 'user2', 'user2@test.com', '222-222-2222');
+
+--echo # Test duplicate username
+--error ER_DUP_ENTRY
+INSERT INTO t4 VALUES (3, 'user1', 'user3@test.com', '333-333-3333');
+
+--echo # Test duplicate email
+--error ER_DUP_ENTRY
+INSERT INTO t4 VALUES (3, 'user3', 'user1@test.com', '333-333-3333');
+
+--echo # Test duplicate phone
+--error ER_DUP_ENTRY
+INSERT INTO t4 VALUES (3, 'user3', 'user3@test.com', '111-111-1111');
+
+--echo # Valid insert
+INSERT INTO t4 VALUES (3, 'user3', 'user3@test.com', '333-333-3333');
+
+--echo # Test 6: Empty string vs NULL
+CREATE TABLE t5 (
+    id INT PRIMARY KEY,
+    code VARCHAR(10) UNIQUE
+) ENGINE=KVT;
+
+INSERT INTO t5 VALUES (1, '');
+--error ER_DUP_ENTRY
+INSERT INTO t5 VALUES (2, '');  # Empty string is not NULL
+
+INSERT INTO t5 VALUES (3, NULL);
+INSERT INTO t5 VALUES (4, NULL);  # Multiple NULLs allowed
+
+SELECT id, code, LENGTH(code) AS code_length FROM t5 ORDER BY id;
+
+--echo # Test 7: Case sensitivity (depends on collation)
+CREATE TABLE t6 (
+    id INT PRIMARY KEY,
+    name VARCHAR(50) UNIQUE COLLATE utf8_general_ci
+) ENGINE=KVT;
+
+INSERT INTO t6 VALUES (1, 'Test');
+--error ER_DUP_ENTRY
+INSERT INTO t6 VALUES (2, 'test');  # Should fail with case-insensitive collation
+
+--echo # Test 8: Long values in unique columns
+CREATE TABLE t7 (
+    id INT PRIMARY KEY,
+    long_text VARCHAR(255) UNIQUE
+) ENGINE=KVT;
+
+SET @long_val = REPEAT('a', 255);
+INSERT INTO t7 VALUES (1, @long_val);
+--error ER_DUP_ENTRY
+INSERT INTO t7 VALUES (2, @long_val);
+
+INSERT INTO t7 VALUES (3, CONCAT(@long_val, 'b'));  # Different value should work
+DELETE FROM t7 WHERE id = 3;  # Clean up for clarity
+
+--echo # Test 9: Delete and reinsert with unique constraint
+DELETE FROM t1 WHERE id = 2;
+INSERT INTO t1 VALUES (10, 'user2@example.com', 'New User Two');  # Should succeed
+SELECT id, email, name FROM t1 WHERE email = 'user2@example.com';
+
+--echo # Test 10: UNIQUE constraint with DEFAULT values
+CREATE TABLE t8 (
+    id INT PRIMARY KEY,
+    status VARCHAR(20) UNIQUE DEFAULT 'active',
+    created DATE
+) ENGINE=KVT;
+
+INSERT INTO t8 (id, created) VALUES (1, '2025-01-01');
+--error ER_DUP_ENTRY
+INSERT INTO t8 (id, created) VALUES (2, '2025-01-02');  # Default 'active' conflicts
+
+INSERT INTO t8 VALUES (3, 'inactive', '2025-01-03');
+INSERT INTO t8 VALUES (4, 'pending', '2025-01-04');
+
+SELECT * FROM t8 ORDER BY id;
+
+--echo # Test 11: Cleanup
+DROP TABLE t1, t2, t3, t4, t5, t6, t7, t8;

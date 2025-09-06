@@ -26,7 +26,9 @@ SET(KVT_SOURCES
     kvt_composite_index.cc
     kvt_composite_index.h
     kvt_index_only_scan.cc
-    kvt_index_only_scan.h)
+    kvt_index_only_scan.h
+    kvt_unique_constraint.cc
+    kvt_unique_constraint.h)
 
 # Include directories
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/sql
