@@ -36,6 +36,8 @@ class ha_kvt: public handler
   uint64_t kvt_tx_id;          // Current transaction ID
   bool is_delayed_insert;
   bool doing_bulk_insert;
+  ha_rows bulk_insert_rows;
+  std::vector<KVTBatchOp> batch_operations;
   
   // Table metadata
   std::string database_name;
@@ -119,11 +121,17 @@ public:
   int extra(enum ha_extra_function operation) override;
   int external_lock(THD *thd, int lock_type) override;
   int delete_all_rows() override;
+  void start_bulk_insert(ha_rows rows, uint flags = 0) override;
+  int end_bulk_insert() override;
   ha_rows records_in_range(uint inx, const key_range *min_key,
                            const key_range *max_key, page_range *pages) override;
   int analyze(THD* thd, HA_CHECK_OPT* check_opt) override;
   int optimize(THD* thd, HA_CHECK_OPT* check_opt) override;
   int check(THD* thd, HA_CHECK_OPT* check_opt) override;
+  
+  // Condition pushdown
+  const COND *cond_push(const COND *cond) override;
+  void cond_pop() override;
 
   THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to,
                              enum thr_lock_type lock_type) override;
@@ -147,6 +155,9 @@ private:
   // Error handling
   int map_kvt_error_to_mysql(KVTError kvt_err, const std::string &error_msg);
   
+  // Batch operations
+  int flush_batch_operations();
+  
   // Bulk operations
   void start_bulk_insert_if_needed();
   void end_bulk_insert_if_needed();
@@ -155,6 +166,10 @@ private:
   std::vector<std::pair<KVTKey, std::string>> scan_results;
   size_t scan_position;
   std::string current_position_key;
+  
+  // Pushed conditions
+  const COND *pushed_cond;
+  bool check_pushed_condition(const uchar *buf);
 };
 
 #endif

@@ -1,0 +1,259 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 3: Bulk Operations Test
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo #
+--echo # Test 1: Multi-row INSERT
+--echo #
+CREATE TABLE kvt_bulk1 (
+  id INT PRIMARY KEY,
+  value INT,
+  data VARCHAR(100)
+) ENGINE=KVT;
+
+# Insert 10 rows in single statement
+INSERT INTO kvt_bulk1 VALUES
+  (1, 100, 'Row 1'),
+  (2, 200, 'Row 2'),
+  (3, 300, 'Row 3'),
+  (4, 400, 'Row 4'),
+  (5, 500, 'Row 5'),
+  (6, 600, 'Row 6'),
+  (7, 700, 'Row 7'),
+  (8, 800, 'Row 8'),
+  (9, 900, 'Row 9'),
+  (10, 1000, 'Row 10');
+
+SELECT COUNT(*) FROM kvt_bulk1;
+SELECT * FROM kvt_bulk1 WHERE id <= 3 ORDER BY id;
+
+DROP TABLE kvt_bulk1;
+
+--echo #
+--echo # Test 2: INSERT ... SELECT
+--echo #
+CREATE TABLE kvt_source (
+  id INT PRIMARY KEY,
+  value INT
+) ENGINE=KVT;
+
+CREATE TABLE kvt_target (
+  id INT PRIMARY KEY,
+  value INT
+) ENGINE=KVT;
+
+# Populate source table
+INSERT INTO kvt_source VALUES
+  (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+
+# Bulk insert from SELECT
+INSERT INTO kvt_target SELECT * FROM kvt_source;
+
+SELECT COUNT(*) FROM kvt_target;
+SELECT * FROM kvt_target ORDER BY id;
+
+# Insert with transformation
+INSERT INTO kvt_target SELECT id + 100, value * 2 FROM kvt_source;
+
+SELECT COUNT(*) FROM kvt_target;
+SELECT * FROM kvt_target WHERE id > 100 ORDER BY id;
+
+DROP TABLE kvt_source, kvt_target;
+
+--echo #
+--echo # Test 3: Large batch insert (1000 rows)
+--echo #
+CREATE TABLE kvt_large_batch (
+  id INT PRIMARY KEY,
+  value INT,
+  text_data VARCHAR(255)
+) ENGINE=KVT;
+
+--disable_query_log
+let $i = 1000;
+while ($i > 0)
+{
+  eval INSERT INTO kvt_large_batch VALUES ($i, $i * 10, CONCAT('Data for row ', $i));
+  dec $i;
+}
+--enable_query_log
+
+SELECT COUNT(*) FROM kvt_large_batch;
+SELECT MIN(id), MAX(id), MIN(value), MAX(value) FROM kvt_large_batch;
+
+# Verify some random samples
+SELECT * FROM kvt_large_batch WHERE id IN (1, 100, 500, 999, 1000) ORDER BY id;
+
+DROP TABLE kvt_large_batch;
+
+--echo #
+--echo # Test 4: LOAD DATA simulation
+--echo #
+CREATE TABLE kvt_load_data (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  age INT,
+  city VARCHAR(50)
+) ENGINE=KVT;
+
+# Simulate LOAD DATA with rapid inserts
+--disable_query_log
+INSERT INTO kvt_load_data VALUES
+  (1, 'John Doe', 25, 'New York'),
+  (2, 'Jane Smith', 30, 'Los Angeles'),
+  (3, 'Bob Johnson', 35, 'Chicago'),
+  (4, 'Alice Brown', 28, 'Houston'),
+  (5, 'Charlie Davis', 42, 'Phoenix'),
+  (6, 'Eva Wilson', 31, 'Philadelphia'),
+  (7, 'Frank Miller', 29, 'San Antonio'),
+  (8, 'Grace Lee', 33, 'San Diego'),
+  (9, 'Henry Taylor', 38, 'Dallas'),
+  (10, 'Iris Anderson', 26, 'San Jose');
+
+let $batch = 10;
+while ($batch > 0)
+{
+  eval INSERT INTO kvt_load_data VALUES
+    ($batch * 10 + 1, CONCAT('User', $batch, '1'), 20 + $batch, 'City1'),
+    ($batch * 10 + 2, CONCAT('User', $batch, '2'), 21 + $batch, 'City2'),
+    ($batch * 10 + 3, CONCAT('User', $batch, '3'), 22 + $batch, 'City3'),
+    ($batch * 10 + 4, CONCAT('User', $batch, '4'), 23 + $batch, 'City4'),
+    ($batch * 10 + 5, CONCAT('User', $batch, '5'), 24 + $batch, 'City5'),
+    ($batch * 10 + 6, CONCAT('User', $batch, '6'), 25 + $batch, 'City6'),
+    ($batch * 10 + 7, CONCAT('User', $batch, '7'), 26 + $batch, 'City7'),
+    ($batch * 10 + 8, CONCAT('User', $batch, '8'), 27 + $batch, 'City8'),
+    ($batch * 10 + 9, CONCAT('User', $batch, '9'), 28 + $batch, 'City9'),
+    ($batch * 10 + 10, CONCAT('User', $batch, '10'), 29 + $batch, 'City10');
+  dec $batch;
+}
+--enable_query_log
+
+SELECT COUNT(*) FROM kvt_load_data;
+SELECT * FROM kvt_load_data WHERE id <= 5 ORDER BY id;
+
+DROP TABLE kvt_load_data;
+
+--echo #
+--echo # Test 5: Bulk UPDATE
+--echo #
+CREATE TABLE kvt_bulk_update (
+  id INT PRIMARY KEY,
+  status VARCHAR(20),
+  counter INT
+) ENGINE=KVT;
+
+# Insert test data
+INSERT INTO kvt_bulk_update VALUES
+  (1, 'active', 0), (2, 'active', 0), (3, 'inactive', 0),
+  (4, 'active', 0), (5, 'pending', 0), (6, 'active', 0),
+  (7, 'inactive', 0), (8, 'active', 0), (9, 'pending', 0),
+  (10, 'active', 0);
+
+# Bulk update all active records
+UPDATE kvt_bulk_update SET counter = counter + 1 WHERE status = 'active';
+SELECT * FROM kvt_bulk_update ORDER BY id;
+
+# Bulk update with multiple conditions
+UPDATE kvt_bulk_update SET status = 'processed', counter = 100 
+WHERE status = 'pending' OR counter > 0;
+SELECT * FROM kvt_bulk_update ORDER BY id;
+
+DROP TABLE kvt_bulk_update;
+
+--echo #
+--echo # Test 6: Bulk DELETE
+--echo #
+CREATE TABLE kvt_bulk_delete (
+  id INT PRIMARY KEY,
+  category VARCHAR(20),
+  value INT
+) ENGINE=KVT;
+
+# Insert test data
+--disable_query_log
+let $i = 100;
+while ($i > 0)
+{
+  if ($i > 75)
+  {
+    eval INSERT INTO kvt_bulk_delete VALUES ($i, 'A', $i);
+  }
+  if ($i > 50)
+  {
+    if ($i <= 75)
+    {
+      eval INSERT INTO kvt_bulk_delete VALUES ($i, 'B', $i);
+    }
+  }
+  if ($i > 25)
+  {
+    if ($i <= 50)
+    {
+      eval INSERT INTO kvt_bulk_delete VALUES ($i, 'C', $i);
+    }
+  }
+  if ($i <= 25)
+  {
+    eval INSERT INTO kvt_bulk_delete VALUES ($i, 'D', $i);
+  }
+  dec $i;
+}
+--enable_query_log
+
+SELECT COUNT(*), category FROM kvt_bulk_delete GROUP BY category ORDER BY category;
+
+# Bulk delete category B
+DELETE FROM kvt_bulk_delete WHERE category = 'B';
+SELECT COUNT(*), category FROM kvt_bulk_delete GROUP BY category ORDER BY category;
+
+# Bulk delete with range condition
+DELETE FROM kvt_bulk_delete WHERE value > 60;
+SELECT COUNT(*), category FROM kvt_bulk_delete GROUP BY category ORDER BY category;
+
+# Delete all remaining
+DELETE FROM kvt_bulk_delete;
+SELECT COUNT(*) FROM kvt_bulk_delete;
+
+DROP TABLE kvt_bulk_delete;
+
+--echo #
+--echo # Test 7: Mixed bulk operations
+--echo #
+CREATE TABLE kvt_mixed_bulk (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  batch_id INT,
+  data VARCHAR(100)
+) ENGINE=KVT;
+
+# Rapid mixed operations
+INSERT INTO kvt_mixed_bulk (batch_id, data) VALUES 
+  (1, 'Batch 1 - Item 1'),
+  (1, 'Batch 1 - Item 2'),
+  (1, 'Batch 1 - Item 3');
+
+INSERT INTO kvt_mixed_bulk (batch_id, data) VALUES 
+  (2, 'Batch 2 - Item 1'),
+  (2, 'Batch 2 - Item 2');
+
+UPDATE kvt_mixed_bulk SET data = CONCAT(data, ' [UPDATED]') WHERE batch_id = 1;
+
+INSERT INTO kvt_mixed_bulk (batch_id, data) VALUES 
+  (3, 'Batch 3 - Item 1'),
+  (3, 'Batch 3 - Item 2'),
+  (3, 'Batch 3 - Item 3'),
+  (3, 'Batch 3 - Item 4');
+
+DELETE FROM kvt_mixed_bulk WHERE batch_id = 2;
+
+SELECT * FROM kvt_mixed_bulk ORDER BY id;
+
+DROP TABLE kvt_mixed_bulk;
+
+--echo # Phase 3 bulk operations tests completed

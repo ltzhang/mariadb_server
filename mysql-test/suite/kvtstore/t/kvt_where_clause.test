@@ -1,0 +1,227 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 3: WHERE Clause and Condition Pushdown Test
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo #
+--echo # Test 1: Basic WHERE conditions
+--echo #
+CREATE TABLE kvt_where1 (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  age INT,
+  salary DECIMAL(10,2)
+) ENGINE=KVT;
+
+INSERT INTO kvt_where1 VALUES
+  (1, 'Alice', 25, 50000),
+  (2, 'Bob', 30, 60000),
+  (3, 'Charlie', 35, 70000),
+  (4, 'David', 40, 80000),
+  (5, 'Eve', 45, 90000),
+  (6, 'Frank', 28, 55000),
+  (7, 'Grace', 33, 65000),
+  (8, 'Henry', 38, 75000),
+  (9, 'Iris', 42, 85000),
+  (10, 'Jack', 50, 100000);
+
+# Equality condition
+SELECT * FROM kvt_where1 WHERE id = 5;
+SELECT * FROM kvt_where1 WHERE name = 'Charlie';
+
+# Range conditions
+SELECT * FROM kvt_where1 WHERE age > 35 ORDER BY id;
+SELECT * FROM kvt_where1 WHERE salary <= 65000 ORDER BY id;
+SELECT * FROM kvt_where1 WHERE age BETWEEN 30 AND 40 ORDER BY id;
+
+DROP TABLE kvt_where1;
+
+--echo #
+--echo # Test 2: Complex WHERE conditions
+--echo #
+CREATE TABLE kvt_where2 (
+  id INT PRIMARY KEY,
+  status VARCHAR(20),
+  priority INT,
+  created DATE,
+  amount DECIMAL(10,2)
+) ENGINE=KVT;
+
+INSERT INTO kvt_where2 VALUES
+  (1, 'active', 1, '2025-01-01', 100.00),
+  (2, 'inactive', 2, '2025-01-02', 200.00),
+  (3, 'active', 3, '2025-01-03', 300.00),
+  (4, 'pending', 1, '2025-01-04', 400.00),
+  (5, 'active', 2, '2025-01-05', 500.00),
+  (6, 'inactive', 3, '2025-01-06', 600.00),
+  (7, 'pending', 1, '2025-01-07', 700.00),
+  (8, 'active', 2, '2025-01-08', 800.00);
+
+# AND conditions
+SELECT * FROM kvt_where2 WHERE status = 'active' AND priority = 2 ORDER BY id;
+SELECT * FROM kvt_where2 WHERE amount > 300 AND created >= '2025-01-05' ORDER BY id;
+
+# OR conditions
+SELECT * FROM kvt_where2 WHERE status = 'active' OR status = 'pending' ORDER BY id;
+SELECT * FROM kvt_where2 WHERE priority = 1 OR amount > 600 ORDER BY id;
+
+# Mixed AND/OR
+SELECT * FROM kvt_where2 
+WHERE (status = 'active' AND priority <= 2) OR amount >= 700 
+ORDER BY id;
+
+DROP TABLE kvt_where2;
+
+--echo #
+--echo # Test 3: NULL handling in WHERE
+--echo #
+CREATE TABLE kvt_where3 (
+  id INT PRIMARY KEY,
+  nullable_int INT,
+  nullable_str VARCHAR(50),
+  non_null_int INT NOT NULL
+) ENGINE=KVT;
+
+INSERT INTO kvt_where3 VALUES
+  (1, NULL, NULL, 100),
+  (2, 10, NULL, 200),
+  (3, NULL, 'test', 300),
+  (4, 20, 'value', 400),
+  (5, 30, 'another', 500);
+
+# IS NULL / IS NOT NULL
+SELECT * FROM kvt_where3 WHERE nullable_int IS NULL ORDER BY id;
+SELECT * FROM kvt_where3 WHERE nullable_str IS NOT NULL ORDER BY id;
+SELECT * FROM kvt_where3 WHERE nullable_int IS NULL AND nullable_str IS NULL;
+
+# NULL in comparisons
+SELECT * FROM kvt_where3 WHERE nullable_int > 15 ORDER BY id;
+SELECT * FROM kvt_where3 WHERE nullable_str = 'test' ORDER BY id;
+
+DROP TABLE kvt_where3;
+
+--echo #
+--echo # Test 4: LIKE and pattern matching
+--echo #
+CREATE TABLE kvt_where4 (
+  id INT PRIMARY KEY,
+  name VARCHAR(100),
+  email VARCHAR(100),
+  description TEXT
+) ENGINE=KVT;
+
+INSERT INTO kvt_where4 VALUES
+  (1, 'John Doe', 'john@example.com', 'Senior developer'),
+  (2, 'Jane Smith', 'jane@test.com', 'Project manager'),
+  (3, 'Bob Johnson', 'bob@example.org', 'Junior developer'),
+  (4, 'Alice Brown', 'alice@demo.com', 'Senior analyst'),
+  (5, 'Charlie Wilson', 'charlie@example.com', 'Developer intern');
+
+# LIKE patterns
+SELECT * FROM kvt_where4 WHERE name LIKE 'J%' ORDER BY id;
+SELECT * FROM kvt_where4 WHERE email LIKE '%example.com' ORDER BY id;
+SELECT * FROM kvt_where4 WHERE description LIKE '%developer%' ORDER BY id;
+
+# NOT LIKE
+SELECT * FROM kvt_where4 WHERE email NOT LIKE '%example%' ORDER BY id;
+
+DROP TABLE kvt_where4;
+
+--echo #
+--echo # Test 5: IN and NOT IN
+--echo #
+CREATE TABLE kvt_where5 (
+  id INT PRIMARY KEY,
+  category VARCHAR(20),
+  value INT
+) ENGINE=KVT;
+
+INSERT INTO kvt_where5 VALUES
+  (1, 'A', 10), (2, 'B', 20), (3, 'C', 30),
+  (4, 'A', 40), (5, 'B', 50), (6, 'D', 60),
+  (7, 'A', 70), (8, 'E', 80), (9, 'B', 90),
+  (10, 'C', 100);
+
+# IN clause
+SELECT * FROM kvt_where5 WHERE category IN ('A', 'B') ORDER BY id;
+SELECT * FROM kvt_where5 WHERE value IN (10, 30, 50, 70, 90) ORDER BY id;
+
+# NOT IN clause
+SELECT * FROM kvt_where5 WHERE category NOT IN ('A', 'B') ORDER BY id;
+SELECT * FROM kvt_where5 WHERE value NOT IN (20, 40, 60, 80, 100) ORDER BY id;
+
+DROP TABLE kvt_where5;
+
+--echo #
+--echo # Test 6: Subqueries in WHERE (if supported)
+--echo #
+CREATE TABLE kvt_where6_parent (
+  id INT PRIMARY KEY,
+  name VARCHAR(50)
+) ENGINE=KVT;
+
+CREATE TABLE kvt_where6_child (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  value INT
+) ENGINE=KVT;
+
+INSERT INTO kvt_where6_parent VALUES (1, 'Parent1'), (2, 'Parent2'), (3, 'Parent3');
+INSERT INTO kvt_where6_child VALUES 
+  (1, 1, 100), (2, 1, 200), (3, 2, 300),
+  (4, 2, 400), (5, 3, 500), (6, 3, 600);
+
+# Subquery with IN
+SELECT * FROM kvt_where6_parent 
+WHERE id IN (SELECT parent_id FROM kvt_where6_child WHERE value > 300)
+ORDER BY id;
+
+# EXISTS subquery
+SELECT * FROM kvt_where6_parent p
+WHERE EXISTS (SELECT 1 FROM kvt_where6_child c WHERE c.parent_id = p.id AND c.value < 300)
+ORDER BY id;
+
+DROP TABLE kvt_where6_child, kvt_where6_parent;
+
+--echo #
+--echo # Test 7: Performance of filtered scans
+--echo #
+CREATE TABLE kvt_where7 (
+  id INT PRIMARY KEY,
+  indexed_col INT,
+  non_indexed_col INT,
+  data VARCHAR(100)
+) ENGINE=KVT;
+
+# Insert 100 rows
+--disable_query_log
+let $i = 100;
+while ($i > 0)
+{
+  eval INSERT INTO kvt_where7 VALUES ($i, $i MOD 10, $i MOD 7, CONCAT('Data-', $i));
+  dec $i;
+}
+--enable_query_log
+
+# Count with WHERE
+SELECT COUNT(*) FROM kvt_where7 WHERE indexed_col = 5;
+SELECT COUNT(*) FROM kvt_where7 WHERE non_indexed_col = 3;
+
+# Complex filtering
+SELECT COUNT(*) FROM kvt_where7 
+WHERE indexed_col IN (1, 3, 5, 7, 9) AND non_indexed_col < 4;
+
+# Range scan with filtering
+SELECT * FROM kvt_where7 
+WHERE id BETWEEN 20 AND 30 AND indexed_col = 5
+ORDER BY id;
+
+DROP TABLE kvt_where7;
+
+--echo # Phase 3 WHERE clause tests completed

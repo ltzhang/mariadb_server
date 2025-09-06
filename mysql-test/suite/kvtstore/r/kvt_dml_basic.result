@@ -1,0 +1,248 @@
+#
+# Phase 3: Basic DML Operations Test
+#
+# Install KVT plugin if not already installed
+#
+# Test 1: Basic INSERT and SELECT
+#
+CREATE TABLE t1 (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+value INT
+) ENGINE=KVT;
+INSERT INTO t1 VALUES (1, 'Alice', 100);
+INSERT INTO t1 VALUES (2, 'Bob', 200);
+INSERT INTO t1 VALUES (3, 'Charlie', 300);
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+1	Alice	100
+2	Bob	200
+3	Charlie	300
+SELECT id, name FROM t1 WHERE id = 2;
+id	name
+2	Bob
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+3
+#
+# Test 2: UPDATE operations
+#
+UPDATE t1 SET value = 250 WHERE id = 2;
+SELECT * FROM t1 WHERE id = 2;
+id	name	value
+2	Bob	250
+UPDATE t1 SET name = 'Alice Smith' WHERE name = 'Alice';
+SELECT * FROM t1 WHERE id = 1;
+id	name	value
+1	Alice Smith	100
+UPDATE t1 SET id = 10 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+2	Bob	250
+3	Charlie	300
+10	Alice Smith	100
+#
+# Test 3: DELETE operations
+#
+DELETE FROM t1 WHERE id = 2;
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+3	Charlie	300
+10	Alice Smith	100
+DELETE FROM t1 WHERE value > 200;
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+10	Alice Smith	100
+#
+# Test 4: Multiple INSERT patterns
+#
+TRUNCATE TABLE t1;
+INSERT INTO t1 (id, name, value) VALUES (1, 'Test1', 111);
+INSERT INTO t1 (id, name) VALUES (2, 'Test2');
+INSERT INTO t1 (id, value) VALUES (3, 333);
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+1	Test1	111
+2	Test2	NULL
+3	NULL	333
+INSERT INTO t1 VALUES 
+(4, 'Test4', 444),
+(5, 'Test5', 555),
+(6, 'Test6', 666);
+SELECT * FROM t1 ORDER BY id;
+id	name	value
+1	Test1	111
+2	Test2	NULL
+3	NULL	333
+4	Test4	444
+5	Test5	555
+6	Test6	666
+#
+# Test 5: NULL handling
+#
+CREATE TABLE t2 (
+id INT PRIMARY KEY,
+nullable_col VARCHAR(50),
+non_null_col INT NOT NULL,
+with_default INT DEFAULT 999
+) ENGINE=KVT;
+INSERT INTO t2 VALUES (1, NULL, 100, 111);
+INSERT INTO t2 VALUES (2, 'Not Null', 200, NULL);
+INSERT INTO t2 (id, non_null_col) VALUES (3, 300);
+SELECT * FROM t2 ORDER BY id;
+id	nullable_col	non_null_col	with_default
+1	NULL	100	111
+2	Not Null	200	NULL
+3	NULL	300	999
+SELECT * FROM t2 WHERE nullable_col IS NULL;
+id	nullable_col	non_null_col	with_default
+1	NULL	100	111
+3	NULL	300	999
+SELECT * FROM t2 WHERE nullable_col IS NOT NULL;
+id	nullable_col	non_null_col	with_default
+2	Not Null	200	NULL
+#
+# Test 6: Auto-increment
+#
+CREATE TABLE t3 (
+id INT AUTO_INCREMENT PRIMARY KEY,
+data VARCHAR(50)
+) ENGINE=KVT;
+INSERT INTO t3 (data) VALUES ('First');
+INSERT INTO t3 (data) VALUES ('Second');
+INSERT INTO t3 (data) VALUES ('Third');
+SELECT * FROM t3 ORDER BY id;
+id	data
+1	First
+2	Second
+3	Third
+INSERT INTO t3 VALUES (10, 'Tenth');
+INSERT INTO t3 (data) VALUES ('After Ten');
+SELECT * FROM t3 ORDER BY id;
+id	data
+1	First
+2	Second
+3	Third
+10	Tenth
+11	After Ten
+#
+# Test 7: Empty and single-row operations
+#
+CREATE TABLE t4 (
+id INT PRIMARY KEY,
+val INT
+) ENGINE=KVT;
+SELECT * FROM t4;
+id	val
+SELECT COUNT(*) FROM t4;
+COUNT(*)
+0
+DELETE FROM t4;
+UPDATE t4 SET val = 1;
+INSERT INTO t4 VALUES (1, 100);
+SELECT * FROM t4;
+id	val
+1	100
+UPDATE t4 SET val = 200;
+SELECT * FROM t4;
+id	val
+1	200
+DELETE FROM t4;
+SELECT COUNT(*) FROM t4;
+COUNT(*)
+0
+#
+# Test 8: Large batch operations
+#
+CREATE TABLE t5 (
+id INT PRIMARY KEY,
+data VARCHAR(100)
+) ENGINE=KVT;
+SELECT COUNT(*) FROM t5;
+COUNT(*)
+100
+SELECT * FROM t5 WHERE id <= 5 ORDER BY id;
+id	data
+1	Data-1
+2	Data-2
+3	Data-3
+4	Data-4
+5	Data-5
+SELECT * FROM t5 WHERE id >= 95 ORDER BY id;
+id	data
+95	Data-95
+96	Data-96
+97	Data-97
+98	Data-98
+99	Data-99
+100	Data-100
+UPDATE t5 SET data = CONCAT(data, '-Updated') WHERE id <= 10;
+SELECT * FROM t5 WHERE id <= 5 ORDER BY id;
+id	data
+1	Data-1-Updated
+2	Data-2-Updated
+3	Data-3-Updated
+4	Data-4-Updated
+5	Data-5-Updated
+DELETE FROM t5 WHERE id > 50;
+SELECT COUNT(*) FROM t5;
+COUNT(*)
+50
+#
+# Test 9: Table with no primary key
+#
+CREATE TABLE t6 (
+col1 INT,
+col2 VARCHAR(50)
+) ENGINE=KVT;
+INSERT INTO t6 VALUES (1, 'One');
+INSERT INTO t6 VALUES (2, 'Two');
+INSERT INTO t6 VALUES (1, 'One-Duplicate');
+SELECT * FROM t6 ORDER BY col1, col2;
+col1	col2
+1	One
+1	One-Duplicate
+2	Two
+UPDATE t6 SET col2 = 'Updated' WHERE col1 = 1;
+SELECT * FROM t6 ORDER BY col1, col2;
+col1	col2
+1	Updated
+1	Updated
+2	Two
+DELETE FROM t6 WHERE col2 = 'Two';
+SELECT * FROM t6 ORDER BY col1, col2;
+col1	col2
+1	Updated
+1	Updated
+#
+# Test 10: Composite primary key
+#
+CREATE TABLE t7 (
+key1 INT,
+key2 VARCHAR(10),
+data VARCHAR(50),
+PRIMARY KEY (key1, key2)
+) ENGINE=KVT;
+INSERT INTO t7 VALUES (1, 'A', 'Data-1A');
+INSERT INTO t7 VALUES (1, 'B', 'Data-1B');
+INSERT INTO t7 VALUES (2, 'A', 'Data-2A');
+SELECT * FROM t7 ORDER BY key1, key2;
+key1	key2	data
+1	A	Data-1A
+1	B	Data-1B
+2	A	Data-2A
+UPDATE t7 SET data = 'Updated' WHERE key1 = 1 AND key2 = 'A';
+SELECT * FROM t7 WHERE key1 = 1 ORDER BY key2;
+key1	key2	data
+1	A	Updated
+1	B	Data-1B
+DELETE FROM t7 WHERE key1 = 2;
+SELECT * FROM t7 ORDER BY key1, key2;
+key1	key2	data
+1	A	Updated
+1	B	Data-1B
+#
+# Cleanup
+#
+DROP TABLE t1, t2, t3, t4, t5, t6, t7;
+# Phase 3 basic DML tests completed

@@ -21,6 +21,7 @@
 #include "ha_kvt.h"
 #include "probes_mysql.h"
 #include "sql_plugin.h"
+#include "item.h"
 #include <mysql/plugin.h>
 
 static handler *kvt_create_handler(handlerton *hton,
@@ -167,9 +168,11 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     kvt_tx_id(0),
     is_delayed_insert(false),
     doing_bulk_insert(false),
+    bulk_insert_rows(0),
     next_rowid(1),
     share(nullptr),
-    scan_position(0)
+    scan_position(0),
+    pushed_cond(nullptr)
 {
 }
 
@@ -301,6 +304,14 @@ int ha_kvt::write_row(const uchar *buf)
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   
+  // Handle auto-increment if needed
+  if (table->next_number_field && buf == table->record[0]) {
+    int error = update_auto_increment();
+    if (error) {
+      DBUG_RETURN(error);
+    }
+  }
+  
   // Generate row key
   std::string row_key = generate_row_key(buf);
   std::string data_key = generate_data_key(row_key);
@@ -312,25 +323,37 @@ int ha_kvt::write_row(const uchar *buf)
     DBUG_RETURN(ret);
   }
   
-  // Store in KVT
-  std::string error_msg;
-  KVTError err = kvt_set(kvt_tx_id, kvt_data_table_id, KVTKey(data_key), row_value, error_msg);
-  
-  if (err != KVTError::SUCCESS) {
-    DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
-  }
-  
-  // Update statistics
-  stats.records++;
-  
-  // Update auto-increment if needed
-  auto* catalog = kvt_catalog::CatalogManager::get_instance();
-  if (table_metadata && table_metadata->auto_increment_values.size() > 0) {
-    for (const auto& [col, val] : table_metadata->auto_increment_values) {
-      catalog->set_auto_increment(database_name, table_name, col, next_rowid);
-      break;
+  // Check if we're doing bulk insert
+  if (doing_bulk_insert) {
+    // Add to batch
+    KVTBatchOp op;
+    op.type = KVTOpType::SET;
+    op.key = KVTKey(data_key);
+    op.value = row_value;
+    batch_operations.push_back(op);
+    
+    // Flush if batch is large enough
+    if (batch_operations.size() >= 1000) {
+      int ret = flush_batch_operations();
+      if (ret != 0) {
+        DBUG_RETURN(ret);
+      }
     }
+  } else {
+    // Regular single insert
+    std::string error_msg;
+    KVTError err = kvt_set(kvt_tx_id, kvt_data_table_id, KVTKey(data_key), row_value, error_msg);
+    
+    if (err != KVTError::SUCCESS) {
+      DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+    }
+    
+    // Update statistics
+    stats.records++;
   }
+  
+  // Store the current position key for subsequent operations
+  current_position_key = data_key;
   
   DBUG_RETURN(0);
 }
@@ -453,23 +476,28 @@ int ha_kvt::rnd_next(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::rnd_next");
   
-  if (scan_position >= scan_results.size()) {
-    DBUG_RETURN(HA_ERR_END_OF_FILE);
+  while (scan_position < scan_results.size()) {
+    // Get next row
+    const auto& [key, value] = scan_results[scan_position++];
+    
+    // Decode row
+    int ret = decode_row(value, buf);
+    if (ret != 0) {
+      continue;  // Skip rows that can't be decoded
+    }
+    
+    // Store position for rnd_pos
+    current_position_key = key;
+    
+    // Check pushed condition if any
+    if (pushed_cond && !check_pushed_condition(buf)) {
+      continue;  // Skip rows that don't match the condition
+    }
+    
+    DBUG_RETURN(0);
   }
   
-  // Get next row
-  const auto& [key, value] = scan_results[scan_position++];
-  
-  // Decode row
-  int ret = decode_row(value, buf);
-  if (ret != 0) {
-    DBUG_RETURN(ret);
-  }
-  
-  // Store position for rnd_pos
-  current_position_key = key;
-  
-  DBUG_RETURN(0);
+  DBUG_RETURN(HA_ERR_END_OF_FILE);
 }
 
 int ha_kvt::rnd_pos(uchar *buf, uchar *pos)
@@ -580,6 +608,77 @@ int ha_kvt::extra(enum ha_extra_function operation)
 int ha_kvt::external_lock(THD *thd, int lock_type)
 {
   DBUG_ENTER("ha_kvt::external_lock");
+  DBUG_RETURN(0);
+}
+
+void ha_kvt::start_bulk_insert(ha_rows rows, uint flags)
+{
+  DBUG_ENTER("ha_kvt::start_bulk_insert");
+  DBUG_PRINT("info", ("rows: %lu flags: %u", (ulong)rows, flags));
+  
+  doing_bulk_insert = true;
+  bulk_insert_rows = rows;
+  
+  // Pre-allocate batch buffer if we know the size
+  if (rows > 0 && rows < 10000) {
+    batch_operations.reserve(rows);
+  }
+  
+  DBUG_VOID_RETURN;
+}
+
+int ha_kvt::end_bulk_insert()
+{
+  DBUG_ENTER("ha_kvt::end_bulk_insert");
+  
+  if (!doing_bulk_insert) {
+    DBUG_RETURN(0);
+  }
+  
+  int error = 0;
+  
+  // Flush any remaining batch operations
+  if (!batch_operations.empty()) {
+    error = flush_batch_operations();
+    batch_operations.clear();
+  }
+  
+  doing_bulk_insert = false;
+  bulk_insert_rows = 0;
+  
+  DBUG_RETURN(error);
+}
+
+int ha_kvt::flush_batch_operations()
+{
+  DBUG_ENTER("ha_kvt::flush_batch_operations");
+  
+  if (batch_operations.empty()) {
+    DBUG_RETURN(0);
+  }
+  
+  // Use kvt_batch_execute if available
+  std::string error_msg;
+  std::vector<KVTError> results(batch_operations.size());
+  
+  KVTError err = kvt_batch_execute(kvt_tx_id, kvt_data_table_id, 
+                                   batch_operations, results, error_msg);
+  
+  if (err != KVTError::SUCCESS) {
+    DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
+  }
+  
+  // Check individual results
+  for (size_t i = 0; i < results.size(); i++) {
+    if (results[i] != KVTError::SUCCESS) {
+      DBUG_RETURN(map_kvt_error_to_mysql(results[i], "Batch operation failed"));
+    }
+  }
+  
+  // Update statistics
+  stats.records += batch_operations.size();
+  
+  batch_operations.clear();
   DBUG_RETURN(0);
 }
 
@@ -790,6 +889,46 @@ int ha_kvt::store_table_metadata()
   auto* catalog = kvt_catalog::CatalogManager::get_instance();
   int ret = catalog->store_table_metadata(database_name, table_name, *table_metadata);
   DBUG_RETURN(ret);
+}
+
+const COND *ha_kvt::cond_push(const COND *cond)
+{
+  DBUG_ENTER("ha_kvt::cond_push");
+  
+  // For now, we accept all conditions and evaluate them locally
+  // In future, we can use KVT's update functions for server-side filtering
+  pushed_cond = cond;
+  
+  DBUG_RETURN(cond);
+}
+
+void ha_kvt::cond_pop()
+{
+  DBUG_ENTER("ha_kvt::cond_pop");
+  pushed_cond = nullptr;
+  DBUG_VOID_RETURN;
+}
+
+bool ha_kvt::check_pushed_condition(const uchar *buf)
+{
+  DBUG_ENTER("ha_kvt::check_pushed_condition");
+  
+  if (!pushed_cond) {
+    DBUG_RETURN(true);
+  }
+  
+  // Evaluate the condition
+  // Note: In MariaDB, conditions are evaluated by calling val_int() on the condition
+  // The record should be in table->record[0]
+  if (buf != table->record[0]) {
+    // Copy record to record[0] for evaluation
+    memcpy(table->record[0], buf, table->s->reclength);
+  }
+  
+  // The condition returns 0 for false, non-zero for true
+  bool result = pushed_cond->val_int() != 0;
+  
+  DBUG_RETURN(result);
 }
 
 struct st_mysql_storage_engine kvt_storage_engine =

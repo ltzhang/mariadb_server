@@ -1,0 +1,208 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 3: Basic DML Operations Test
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo #
+--echo # Test 1: Basic INSERT and SELECT
+--echo #
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  value INT
+) ENGINE=KVT;
+
+INSERT INTO t1 VALUES (1, 'Alice', 100);
+INSERT INTO t1 VALUES (2, 'Bob', 200);
+INSERT INTO t1 VALUES (3, 'Charlie', 300);
+
+SELECT * FROM t1 ORDER BY id;
+SELECT id, name FROM t1 WHERE id = 2;
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # Test 2: UPDATE operations
+--echo #
+UPDATE t1 SET value = 250 WHERE id = 2;
+SELECT * FROM t1 WHERE id = 2;
+
+UPDATE t1 SET name = 'Alice Smith' WHERE name = 'Alice';
+SELECT * FROM t1 WHERE id = 1;
+
+# Test primary key update
+UPDATE t1 SET id = 10 WHERE id = 1;
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Test 3: DELETE operations
+--echo #
+DELETE FROM t1 WHERE id = 2;
+SELECT * FROM t1 ORDER BY id;
+
+DELETE FROM t1 WHERE value > 200;
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Test 4: Multiple INSERT patterns
+--echo #
+TRUNCATE TABLE t1;
+
+# INSERT with column list
+INSERT INTO t1 (id, name, value) VALUES (1, 'Test1', 111);
+INSERT INTO t1 (id, name) VALUES (2, 'Test2');
+INSERT INTO t1 (id, value) VALUES (3, 333);
+
+SELECT * FROM t1 ORDER BY id;
+
+# Multiple values in single INSERT
+INSERT INTO t1 VALUES 
+  (4, 'Test4', 444),
+  (5, 'Test5', 555),
+  (6, 'Test6', 666);
+
+SELECT * FROM t1 ORDER BY id;
+
+--echo #
+--echo # Test 5: NULL handling
+--echo #
+CREATE TABLE t2 (
+  id INT PRIMARY KEY,
+  nullable_col VARCHAR(50),
+  non_null_col INT NOT NULL,
+  with_default INT DEFAULT 999
+) ENGINE=KVT;
+
+INSERT INTO t2 VALUES (1, NULL, 100, 111);
+INSERT INTO t2 VALUES (2, 'Not Null', 200, NULL);
+INSERT INTO t2 (id, non_null_col) VALUES (3, 300);
+
+SELECT * FROM t2 ORDER BY id;
+
+# Test NULL in WHERE clause
+SELECT * FROM t2 WHERE nullable_col IS NULL;
+SELECT * FROM t2 WHERE nullable_col IS NOT NULL;
+
+--echo #
+--echo # Test 6: Auto-increment
+--echo #
+CREATE TABLE t3 (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  data VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t3 (data) VALUES ('First');
+INSERT INTO t3 (data) VALUES ('Second');
+INSERT INTO t3 (data) VALUES ('Third');
+
+SELECT * FROM t3 ORDER BY id;
+
+# Explicit value for auto-increment
+INSERT INTO t3 VALUES (10, 'Tenth');
+INSERT INTO t3 (data) VALUES ('After Ten');
+
+SELECT * FROM t3 ORDER BY id;
+
+--echo #
+--echo # Test 7: Empty and single-row operations
+--echo #
+CREATE TABLE t4 (
+  id INT PRIMARY KEY,
+  val INT
+) ENGINE=KVT;
+
+# Empty table operations
+SELECT * FROM t4;
+SELECT COUNT(*) FROM t4;
+DELETE FROM t4;
+UPDATE t4 SET val = 1;
+
+# Single row operations
+INSERT INTO t4 VALUES (1, 100);
+SELECT * FROM t4;
+UPDATE t4 SET val = 200;
+SELECT * FROM t4;
+DELETE FROM t4;
+SELECT COUNT(*) FROM t4;
+
+--echo #
+--echo # Test 8: Large batch operations
+--echo #
+CREATE TABLE t5 (
+  id INT PRIMARY KEY,
+  data VARCHAR(100)
+) ENGINE=KVT;
+
+# Insert 100 rows
+--disable_query_log
+let $i = 100;
+while ($i > 0)
+{
+  eval INSERT INTO t5 VALUES ($i, CONCAT('Data-', $i));
+  dec $i;
+}
+--enable_query_log
+
+SELECT COUNT(*) FROM t5;
+SELECT * FROM t5 WHERE id <= 5 ORDER BY id;
+SELECT * FROM t5 WHERE id >= 95 ORDER BY id;
+
+# Update batch
+UPDATE t5 SET data = CONCAT(data, '-Updated') WHERE id <= 10;
+SELECT * FROM t5 WHERE id <= 5 ORDER BY id;
+
+# Delete batch
+DELETE FROM t5 WHERE id > 50;
+SELECT COUNT(*) FROM t5;
+
+--echo #
+--echo # Test 9: Table with no primary key
+--echo #
+CREATE TABLE t6 (
+  col1 INT,
+  col2 VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t6 VALUES (1, 'One');
+INSERT INTO t6 VALUES (2, 'Two');
+INSERT INTO t6 VALUES (1, 'One-Duplicate');
+
+SELECT * FROM t6 ORDER BY col1, col2;
+UPDATE t6 SET col2 = 'Updated' WHERE col1 = 1;
+SELECT * FROM t6 ORDER BY col1, col2;
+DELETE FROM t6 WHERE col2 = 'Two';
+SELECT * FROM t6 ORDER BY col1, col2;
+
+--echo #
+--echo # Test 10: Composite primary key
+--echo #
+CREATE TABLE t7 (
+  key1 INT,
+  key2 VARCHAR(10),
+  data VARCHAR(50),
+  PRIMARY KEY (key1, key2)
+) ENGINE=KVT;
+
+INSERT INTO t7 VALUES (1, 'A', 'Data-1A');
+INSERT INTO t7 VALUES (1, 'B', 'Data-1B');
+INSERT INTO t7 VALUES (2, 'A', 'Data-2A');
+
+SELECT * FROM t7 ORDER BY key1, key2;
+
+UPDATE t7 SET data = 'Updated' WHERE key1 = 1 AND key2 = 'A';
+SELECT * FROM t7 WHERE key1 = 1 ORDER BY key2;
+
+DELETE FROM t7 WHERE key1 = 2;
+SELECT * FROM t7 ORDER BY key1, key2;
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE t1, t2, t3, t4, t5, t6, t7;
+
+--echo # Phase 3 basic DML tests completed

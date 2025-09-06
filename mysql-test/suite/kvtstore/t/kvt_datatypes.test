@@ -1,0 +1,309 @@
+--source include/have_kvt.inc
+
+--echo #
+--echo # Phase 3: Data Type Validation Test
+--echo #
+
+--echo # Install KVT plugin if not already installed
+--disable_warnings
+INSTALL SONAME 'ha_kvt';
+--enable_warnings
+
+--echo #
+--echo # Test 1: Integer types
+--echo #
+CREATE TABLE kvt_int_types (
+  id INT PRIMARY KEY,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  mediumint_col MEDIUMINT,
+  int_col INT,
+  bigint_col BIGINT,
+  tinyint_u TINYINT UNSIGNED,
+  smallint_u SMALLINT UNSIGNED,
+  mediumint_u MEDIUMINT UNSIGNED,
+  int_u INT UNSIGNED,
+  bigint_u BIGINT UNSIGNED
+) ENGINE=KVT;
+
+# Test boundary values
+INSERT INTO kvt_int_types VALUES (
+  1,
+  -128, -32768, -8388608, -2147483648, -9223372036854775808,
+  255, 65535, 16777215, 4294967295, 18446744073709551615
+);
+
+INSERT INTO kvt_int_types VALUES (
+  2,
+  127, 32767, 8388607, 2147483647, 9223372036854775807,
+  0, 0, 0, 0, 0
+);
+
+SELECT * FROM kvt_int_types ORDER BY id;
+
+# Test NULL values
+INSERT INTO kvt_int_types (id) VALUES (3);
+SELECT * FROM kvt_int_types WHERE id = 3;
+
+DROP TABLE kvt_int_types;
+
+--echo #
+--echo # Test 2: Decimal and floating-point types
+--echo #
+CREATE TABLE kvt_decimal_types (
+  id INT PRIMARY KEY,
+  decimal_col DECIMAL(10,2),
+  numeric_col NUMERIC(15,5),
+  float_col FLOAT,
+  double_col DOUBLE,
+  real_col REAL
+) ENGINE=KVT;
+
+INSERT INTO kvt_decimal_types VALUES (
+  1,
+  99999999.99,
+  9999999999.99999,
+  3.14159,
+  2.718281828,
+  1.41421356
+);
+
+INSERT INTO kvt_decimal_types VALUES (
+  2,
+  -99999999.99,
+  -9999999999.99999,
+  -3.14159,
+  -2.718281828,
+  -1.41421356
+);
+
+SELECT * FROM kvt_decimal_types ORDER BY id;
+
+# Test precision
+INSERT INTO kvt_decimal_types VALUES (
+  3,
+  123.456,  # Will be rounded to 123.46
+  123.456789,  # Will be rounded to 123.45679
+  1.23456789012345e10,
+  1.23456789012345e100,
+  1.23456789012345e-10
+);
+
+SELECT * FROM kvt_decimal_types WHERE id = 3;
+
+DROP TABLE kvt_decimal_types;
+
+--echo #
+--echo # Test 3: String types
+--echo #
+CREATE TABLE kvt_string_types (
+  id INT PRIMARY KEY,
+  char_col CHAR(10),
+  varchar_col VARCHAR(255),
+  binary_col BINARY(10),
+  varbinary_col VARBINARY(255),
+  tinytext_col TINYTEXT,
+  text_col TEXT,
+  mediumtext_col MEDIUMTEXT,
+  longtext_col LONGTEXT
+) ENGINE=KVT;
+
+INSERT INTO kvt_string_types VALUES (
+  1,
+  'CHAR10',
+  'Variable length string up to 255 characters',
+  'BINARY',
+  'Variable binary data',
+  'Tiny text field',
+  'Regular text field with more content',
+  'Medium text can hold up to 16MB of data',
+  'Long text can hold up to 4GB of data'
+);
+
+# Test empty strings and NULL
+INSERT INTO kvt_string_types VALUES (
+  2,
+  '',
+  '',
+  '',
+  '',
+  '',
+  '',
+  '',
+  ''
+);
+
+INSERT INTO kvt_string_types (id) VALUES (3);
+
+SELECT id, LENGTH(char_col), LENGTH(varchar_col), LENGTH(text_col) 
+FROM kvt_string_types ORDER BY id;
+
+# Test special characters
+INSERT INTO kvt_string_types VALUES (
+  4,
+  'Special!@#',
+  'Unicode: 你好世界 🌍',
+  NULL,
+  NULL,
+  'Line1\nLine2\nLine3',
+  'Tab\tseparated\tvalues',
+  'Quote"s and \'apostrophes\'',
+  'Backslash \\ and forward slash /'
+);
+
+SELECT * FROM kvt_string_types WHERE id = 4;
+
+DROP TABLE kvt_string_types;
+
+--echo #
+--echo # Test 4: Date and time types
+--echo #
+CREATE TABLE kvt_datetime_types (
+  id INT PRIMARY KEY,
+  date_col DATE,
+  time_col TIME,
+  datetime_col DATETIME,
+  timestamp_col TIMESTAMP,
+  year_col YEAR
+) ENGINE=KVT;
+
+INSERT INTO kvt_datetime_types VALUES (
+  1,
+  '2025-01-06',
+  '14:30:45',
+  '2025-01-06 14:30:45',
+  '2025-01-06 14:30:45',
+  2025
+);
+
+# Test boundary values
+INSERT INTO kvt_datetime_types VALUES (
+  2,
+  '1000-01-01',
+  '-838:59:59',
+  '1000-01-01 00:00:00',
+  '1970-01-01 00:00:01',
+  1901
+);
+
+INSERT INTO kvt_datetime_types VALUES (
+  3,
+  '9999-12-31',
+  '838:59:59',
+  '9999-12-31 23:59:59',
+  '2038-01-19 03:14:07',
+  2155
+);
+
+SELECT * FROM kvt_datetime_types ORDER BY id;
+
+# Test NULL values
+INSERT INTO kvt_datetime_types (id) VALUES (4);
+SELECT * FROM kvt_datetime_types WHERE id = 4;
+
+DROP TABLE kvt_datetime_types;
+
+--echo #
+--echo # Test 5: BLOB types
+--echo #
+CREATE TABLE kvt_blob_types (
+  id INT PRIMARY KEY,
+  tinyblob_col TINYBLOB,
+  blob_col BLOB,
+  mediumblob_col MEDIUMBLOB,
+  longblob_col LONGBLOB
+) ENGINE=KVT;
+
+# Insert binary data
+INSERT INTO kvt_blob_types VALUES (
+  1,
+  'Tiny',
+  'Regular BLOB data',
+  'Medium BLOB can store up to 16MB',
+  'Long BLOB can store up to 4GB'
+);
+
+# Test with actual binary data
+INSERT INTO kvt_blob_types VALUES (
+  2,
+  UNHEX('0102030405'),
+  UNHEX('DEADBEEF'),
+  UNHEX('CAFEBABE'),
+  UNHEX('0123456789ABCDEF')
+);
+
+SELECT id, LENGTH(tinyblob_col), LENGTH(blob_col), 
+       LENGTH(mediumblob_col), LENGTH(longblob_col)
+FROM kvt_blob_types ORDER BY id;
+
+DROP TABLE kvt_blob_types;
+
+--echo #
+--echo # Test 6: Special types
+--echo #
+CREATE TABLE kvt_special_types (
+  id INT PRIMARY KEY,
+  bool_col BOOLEAN,
+  bit_col BIT(8),
+  enum_col ENUM('small', 'medium', 'large'),
+  set_col SET('read', 'write', 'execute'),
+  json_col JSON
+) ENGINE=KVT;
+
+INSERT INTO kvt_special_types VALUES (
+  1,
+  TRUE,
+  b'10101010',
+  'medium',
+  'read,execute',
+  '{"name": "test", "value": 123}'
+);
+
+INSERT INTO kvt_special_types VALUES (
+  2,
+  FALSE,
+  b'11110000',
+  'large',
+  'write',
+  '["array", "of", "values"]'
+);
+
+SELECT * FROM kvt_special_types ORDER BY id;
+
+# Test NULL values
+INSERT INTO kvt_special_types (id) VALUES (3);
+SELECT * FROM kvt_special_types WHERE id = 3;
+
+DROP TABLE kvt_special_types;
+
+--echo #
+--echo # Test 7: Mixed type operations
+--echo #
+CREATE TABLE kvt_mixed (
+  id INT PRIMARY KEY,
+  name VARCHAR(50),
+  age INT,
+  salary DECIMAL(10,2),
+  hire_date DATE,
+  is_active BOOLEAN,
+  notes TEXT
+) ENGINE=KVT;
+
+# Bulk insert with mixed types
+INSERT INTO kvt_mixed VALUES
+  (1, 'Alice', 30, 75000.50, '2020-01-15', TRUE, 'Senior developer'),
+  (2, 'Bob', 25, 60000.00, '2021-06-01', TRUE, 'Junior developer'),
+  (3, 'Charlie', 35, 85000.75, '2019-03-20', FALSE, 'Project manager'),
+  (4, NULL, NULL, NULL, NULL, NULL, NULL);
+
+SELECT * FROM kvt_mixed ORDER BY id;
+
+# Test WHERE clause with different types
+SELECT * FROM kvt_mixed WHERE age > 25 AND is_active = TRUE;
+SELECT * FROM kvt_mixed WHERE salary BETWEEN 60000 AND 80000;
+SELECT * FROM kvt_mixed WHERE hire_date < '2021-01-01';
+SELECT * FROM kvt_mixed WHERE name IS NULL OR age IS NULL;
+
+DROP TABLE kvt_mixed;
+
+--echo # Phase 3 data type validation tests completed
