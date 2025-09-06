@@ -29,18 +29,18 @@ double RTreeNode::calculate_enlargement(const MBR& new_mbr) const {
 }
 
 // SpatialSearchIterator implementation
-SpatialSearchIterator::SpatialSearchIterator(kvt_transaction_t* txn,
+SpatialSearchIterator::SpatialSearchIterator(uint64_t txn_id,
                                            uint64_t table_id,
                                            uint32_t index_id,
                                            const MBR& search_mbr,
                                            SpatialPredicate predicate)
-    : txn_(txn), table_id_(table_id), index_id_(index_id),
+    : txn_id_(txn_id), table_id_(table_id), index_id_(index_id),
       search_mbr_(search_mbr), predicate_(predicate),
       current_index_(0), result_count_(0) {
     
     // Get root node and start search
     KVTSpatialAdapter* adapter = KVTSpatialAdapter::get_instance();
-    uint64_t root_id = adapter->get_root_node_id(txn, table_id, index_id);
+    uint64_t root_id = adapter->get_root_node_id(txn_id, table_id, index_id);
     
     if (root_id != 0) {
         search_queue_.push(SearchState(root_id, 255)); // 255 = unknown level
@@ -77,7 +77,7 @@ void SpatialSearchIterator::reset() {
     
     // Restart search from root
     KVTSpatialAdapter* adapter = KVTSpatialAdapter::get_instance();
-    uint64_t root_id = adapter->get_root_node_id(txn_, table_id_, index_id_);
+    uint64_t root_id = adapter->get_root_node_id(txn_id_, table_id_, index_id_);
     
     if (root_id != 0) {
         search_queue_.push(SearchState(root_id, 255));
@@ -123,7 +123,7 @@ bool SpatialSearchIterator::matches_predicate(const MBR& mbr) const {
 
 std::unique_ptr<RTreeNode> SpatialSearchIterator::load_node(uint64_t node_id) {
     KVTSpatialAdapter* adapter = KVTSpatialAdapter::get_instance();
-    return adapter->load_node(txn_, table_id_, index_id_, node_id);
+    return adapter->load_node(txn_id_, table_id_, index_id_, node_id);
 }
 
 // KVTSpatialAdapter implementation
@@ -147,23 +147,23 @@ void KVTSpatialAdapter::shutdown() {
     instance_ = nullptr;
 }
 
-int KVTSpatialAdapter::create_spatial_index(kvt_transaction_t* txn,
+int KVTSpatialAdapter::create_spatial_index(uint64_t txn_id,
                                            uint64_t table_id,
                                            uint32_t index_id) {
     // Create root node
     auto root = std::make_unique<RTreeNode>();
-    root->node_id = allocate_node_id(txn, table_id, index_id);
+    root->node_id = allocate_node_id(txn_id, table_id, index_id);
     root->level = 0;  // Start as leaf
     root->entry_count = 0;
     
     // Save root node
-    int ret = save_node(txn, table_id, index_id, *root);
+    int ret = save_node(txn_id, table_id, index_id, *root);
     if (ret != 0) {
         return ret;
     }
     
     // Set root node ID in metadata
-    ret = set_root_node_id(txn, table_id, index_id, root->node_id);
+    ret = set_root_node_id(txn_id, table_id, index_id, root->node_id);
     if (ret != 0) {
         return ret;
     }
@@ -174,11 +174,17 @@ int KVTSpatialAdapter::create_spatial_index(kvt_transaction_t* txn,
     size_t key_len;
     make_meta_key(key_buf, &key_len, table_id, index_id, META_INDEX_STATS);
     
-    return kvt_set(txn, key_buf, key_len,
-                   reinterpret_cast<uint8_t*>(&stats), sizeof(stats));
+    // Construct table ID for spatial metadata
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    KVTError err = kvt_set(txn_id, spatial_meta_table, 
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          std::string(reinterpret_cast<char*>(&stats), sizeof(stats)),
+                          error_msg);
+    return err == KVTError::SUCCESS ? 0 : -1;
 }
 
-int KVTSpatialAdapter::drop_spatial_index(kvt_transaction_t* txn,
+int KVTSpatialAdapter::drop_spatial_index(uint64_t txn_id,
                                          uint64_t table_id,
                                          uint32_t index_id) {
     // Clear cache for this index
@@ -192,59 +198,62 @@ int KVTSpatialAdapter::drop_spatial_index(kvt_transaction_t* txn,
     make_node_key(start_key, &start_len, table_id, index_id, 0);
     make_node_key(end_key, &end_len, table_id, index_id, UINT64_MAX);
     
-    kvt_scan_t* scan = kvt_scan_init(txn, start_key, start_len,
-                                     end_key, end_len, 1000);
-    if (!scan) {
+    // Use kvt_scan to get all keys in range
+    uint64_t spatial_index_table = (uint64_t(SPATIAL_INDEX_KEYSPACE) << 56) | table_id;
+    std::vector<std::pair<KVTKey, std::string>> scan_results;
+    std::string error_msg;
+    
+    KVTError err = kvt_scan(txn_id, spatial_index_table,
+                           KVTKey(std::string(reinterpret_cast<char*>(start_key), start_len)),
+                           KVTKey(std::string(reinterpret_cast<char*>(end_key), end_len)),
+                           1000,  // Limit
+                           scan_results,
+                           error_msg);
+    
+    if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
         return -1;
     }
     
-    std::vector<std::vector<uint8_t>> keys_to_delete;
-    uint8_t* key;
-    size_t key_size;
-    uint8_t* value;
-    size_t value_size;
-    
-    while (kvt_scan_next(scan, &key, &key_size, &value, &value_size) == 0) {
-        keys_to_delete.emplace_back(key, key + key_size);
-    }
-    kvt_scan_close(scan);
-    
     // Delete all found keys
-    for (const auto& key_vec : keys_to_delete) {
-        kvt_delete(txn, key_vec.data(), key_vec.size());
+    for (const auto& kv : scan_results) {
+        kvt_del(txn_id, spatial_index_table, kv.first, error_msg);
     }
     
     // Delete metadata
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
     make_meta_key(start_key, &start_len, table_id, index_id, META_ROOT_NODE);
-    kvt_delete(txn, start_key, start_len);
+    kvt_del(txn_id, spatial_meta_table, 
+            KVTKey(std::string(reinterpret_cast<char*>(start_key), start_len)), error_msg);
     
     make_meta_key(start_key, &start_len, table_id, index_id, META_NEXT_NODE_ID);
-    kvt_delete(txn, start_key, start_len);
+    kvt_del(txn_id, spatial_meta_table,
+            KVTKey(std::string(reinterpret_cast<char*>(start_key), start_len)), error_msg);
     
     make_meta_key(start_key, &start_len, table_id, index_id, META_INDEX_STATS);
-    kvt_delete(txn, start_key, start_len);
+    kvt_del(txn_id, spatial_meta_table,
+            KVTKey(std::string(reinterpret_cast<char*>(start_key), start_len)), error_msg);
     
     return 0;
 }
 
-int KVTSpatialAdapter::insert_spatial(kvt_transaction_t* txn,
+int KVTSpatialAdapter::insert_spatial(uint64_t txn_id,
                                      uint64_t table_id,
                                      uint32_t index_id,
                                      uint64_t row_id,
                                      const MBR& mbr) {
     InsertContext ctx;
-    ctx.txn = txn;
+    ctx.txn_id = txn_id;
     ctx.table_id = table_id;
     ctx.index_id = index_id;
     
-    uint64_t root_id = get_root_node_id(txn, table_id, index_id);
+    uint64_t root_id = get_root_node_id(txn_id, table_id, index_id);
     if (root_id == 0) {
         // Index doesn't exist, create it
-        int ret = create_spatial_index(txn, table_id, index_id);
+        int ret = create_spatial_index(txn_id, table_id, index_id);
         if (ret != 0) {
             return ret;
         }
-        root_id = get_root_node_id(txn, table_id, index_id);
+        root_id = get_root_node_id(txn_id, table_id, index_id);
     }
     
     RTreeEntry new_entry(mbr, row_id);
@@ -255,7 +264,7 @@ int KVTSpatialAdapter::insert_internal(InsertContext& ctx,
                                       uint64_t node_id,
                                       uint8_t level,
                                       const RTreeEntry& entry) {
-    auto node = load_node(ctx.txn, ctx.table_id, ctx.index_id, node_id);
+    auto node = load_node(ctx.txn_id, ctx.table_id, ctx.index_id, node_id);
     if (!node) {
         return -1;
     }
@@ -268,7 +277,7 @@ int KVTSpatialAdapter::insert_internal(InsertContext& ctx,
             node->entries.push_back(entry);
             node->entry_count++;
             node->recalculate_mbr();
-            return save_node(ctx.txn, ctx.table_id, ctx.index_id, *node);
+            return save_node(ctx.txn_id, ctx.table_id, ctx.index_id, *node);
         } else {
             // Node is full, need to split
             auto split_result = split_node(*node, entry);
@@ -276,12 +285,15 @@ int KVTSpatialAdapter::insert_internal(InsertContext& ctx,
                 return -1;
             }
             
+            // Allocate ID for the new right node
+            split_result->right_node->node_id = allocate_node_id(ctx.txn_id, ctx.table_id, ctx.index_id);
+            
             // Save both new nodes
-            int ret = save_node(ctx.txn, ctx.table_id, ctx.index_id,
+            int ret = save_node(ctx.txn_id, ctx.table_id, ctx.index_id,
                               *split_result->left_node);
             if (ret != 0) return ret;
             
-            ret = save_node(ctx.txn, ctx.table_id, ctx.index_id,
+            ret = save_node(ctx.txn_id, ctx.table_id, ctx.index_id,
                           *split_result->right_node);
             if (ret != 0) return ret;
             
@@ -300,11 +312,11 @@ int KVTSpatialAdapter::insert_internal(InsertContext& ctx,
         
         if (ret == 0) {
             // Update parent MBR if needed
-            auto child = load_node(ctx.txn, ctx.table_id, ctx.index_id, child_id);
+            auto child = load_node(ctx.txn_id, ctx.table_id, ctx.index_id, child_id);
             if (child) {
                 node->entries[best_index].mbr = child->node_mbr;
                 node->recalculate_mbr();
-                save_node(ctx.txn, ctx.table_id, ctx.index_id, *node);
+                save_node(ctx.txn_id, ctx.table_id, ctx.index_id, *node);
             }
         }
         
@@ -416,7 +428,8 @@ std::unique_ptr<SplitResult> KVTSpatialAdapter::split_node(const RTreeNode& node
     result->left_node->entry_count = result->left_node->entries.size();
     result->left_node->recalculate_mbr();
     
-    result->right_node->node_id = allocate_node_id(ctx.txn, ctx.table_id, ctx.index_id);
+    // Right node ID will be allocated by caller
+    result->right_node->node_id = 0;  // Will be set by caller
     result->right_node->entry_count = result->right_node->entries.size();
     result->right_node->recalculate_mbr();
     
@@ -455,7 +468,7 @@ void KVTSpatialAdapter::adjust_tree(InsertContext& ctx,
     // If we split the root, create a new root
     if (ctx.path.size() == 1) {
         auto new_root = std::make_unique<RTreeNode>();
-        new_root->node_id = allocate_node_id(ctx.txn, ctx.table_id, ctx.index_id);
+        new_root->node_id = allocate_node_id(ctx.txn_id, ctx.table_id, ctx.index_id);
         new_root->level = 1;  // One level above leaves
         
         new_root->entries.emplace_back(left_mbr, left_node_id);
@@ -463,26 +476,26 @@ void KVTSpatialAdapter::adjust_tree(InsertContext& ctx,
         new_root->entry_count = 2;
         new_root->recalculate_mbr();
         
-        save_node(ctx.txn, ctx.table_id, ctx.index_id, *new_root);
-        set_root_node_id(ctx.txn, ctx.table_id, ctx.index_id, new_root->node_id);
+        save_node(ctx.txn_id, ctx.table_id, ctx.index_id, *new_root);
+        set_root_node_id(ctx.txn_id, ctx.table_id, ctx.index_id, new_root->node_id);
     }
     // TODO: Handle splits at higher levels
 }
 
-int KVTSpatialAdapter::delete_spatial(kvt_transaction_t* txn,
+int KVTSpatialAdapter::delete_spatial(uint64_t txn_id,
                                      uint64_t table_id,
                                      uint32_t index_id,
                                      uint64_t row_id,
                                      const MBR& mbr) {
     DeleteContext ctx;
-    ctx.txn = txn;
+    ctx.txn_id = txn_id;
     ctx.table_id = table_id;
     ctx.index_id = index_id;
     ctx.target_row_id = row_id;
     ctx.target_mbr = mbr;
     ctx.found = false;
     
-    uint64_t root_id = get_root_node_id(txn, table_id, index_id);
+    uint64_t root_id = get_root_node_id(txn_id, table_id, index_id);
     if (root_id == 0) {
         return -1;  // Index doesn't exist
     }
@@ -500,7 +513,7 @@ int KVTSpatialAdapter::delete_spatial(kvt_transaction_t* txn,
 int KVTSpatialAdapter::delete_internal(DeleteContext& ctx,
                                       uint64_t node_id,
                                       uint8_t level) {
-    auto node = load_node(ctx.txn, ctx.table_id, ctx.index_id, node_id);
+    auto node = load_node(ctx.txn_id, ctx.table_id, ctx.index_id, node_id);
     if (!node) {
         return -1;
     }
@@ -514,7 +527,7 @@ int KVTSpatialAdapter::delete_internal(DeleteContext& ctx,
                 node->entry_count--;
                 node->recalculate_mbr();
                 ctx.found = true;
-                return save_node(ctx.txn, ctx.table_id, ctx.index_id, *node);
+                return save_node(ctx.txn_id, ctx.table_id, ctx.index_id, *node);
             }
         }
     } else {
@@ -524,7 +537,7 @@ int KVTSpatialAdapter::delete_internal(DeleteContext& ctx,
                 int ret = delete_internal(ctx, entry.ptr.child_id, node->level - 1);
                 if (ret == 0 && ctx.found) {
                     // Update parent MBR if needed
-                    auto child = load_node(ctx.txn, ctx.table_id, ctx.index_id,
+                    auto child = load_node(ctx.txn_id, ctx.table_id, ctx.index_id,
                                          entry.ptr.child_id);
                     if (child) {
                         // Find and update the entry
@@ -535,7 +548,7 @@ int KVTSpatialAdapter::delete_internal(DeleteContext& ctx,
                             }
                         }
                         node->recalculate_mbr();
-                        save_node(ctx.txn, ctx.table_id, ctx.index_id, *node);
+                        save_node(ctx.txn_id, ctx.table_id, ctx.index_id, *node);
                     }
                     return 0;
                 }
@@ -546,40 +559,40 @@ int KVTSpatialAdapter::delete_internal(DeleteContext& ctx,
     return ctx.found ? 0 : -1;
 }
 
-int KVTSpatialAdapter::update_spatial(kvt_transaction_t* txn,
+int KVTSpatialAdapter::update_spatial(uint64_t txn_id,
                                      uint64_t table_id,
                                      uint32_t index_id,
                                      uint64_t row_id,
                                      const MBR& old_mbr,
                                      const MBR& new_mbr) {
     // Simple implementation: delete then insert
-    int ret = delete_spatial(txn, table_id, index_id, row_id, old_mbr);
+    int ret = delete_spatial(txn_id, table_id, index_id, row_id, old_mbr);
     if (ret != 0) {
         return ret;
     }
     
-    return insert_spatial(txn, table_id, index_id, row_id, new_mbr);
+    return insert_spatial(txn_id, table_id, index_id, row_id, new_mbr);
 }
 
 std::unique_ptr<SpatialSearchIterator> KVTSpatialAdapter::search(
-    kvt_transaction_t* txn,
+    uint64_t txn_id,
     uint64_t table_id,
     uint32_t index_id,
     const MBR& search_mbr,
     SpatialPredicate predicate) {
     
-    return std::make_unique<SpatialSearchIterator>(txn, table_id, index_id,
+    return std::make_unique<SpatialSearchIterator>(txn_id, table_id, index_id,
                                                    search_mbr, predicate);
 }
 
-int KVTSpatialAdapter::bulk_load(kvt_transaction_t* txn,
+int KVTSpatialAdapter::bulk_load(uint64_t txn_id,
                                 uint64_t table_id,
                                 uint32_t index_id,
                                 const std::vector<std::pair<uint64_t, MBR>>& entries) {
     // Simple implementation: insert one by one
     // TODO: Implement STR (Sort-Tile-Recursive) bulk loading
     for (const auto& entry : entries) {
-        int ret = insert_spatial(txn, table_id, index_id,
+        int ret = insert_spatial(txn_id, table_id, index_id,
                                entry.first, entry.second);
         if (ret != 0) {
             return ret;
@@ -588,7 +601,7 @@ int KVTSpatialAdapter::bulk_load(kvt_transaction_t* txn,
     return 0;
 }
 
-int KVTSpatialAdapter::get_index_stats(kvt_transaction_t* txn,
+int KVTSpatialAdapter::get_index_stats(uint64_t txn_id,
                                       uint64_t table_id,
                                       uint32_t index_id,
                                       SpatialIndexStats* stats) {
@@ -596,19 +609,23 @@ int KVTSpatialAdapter::get_index_stats(kvt_transaction_t* txn,
     size_t key_len;
     make_meta_key(key_buf, &key_len, table_id, index_id, META_INDEX_STATS);
     
-    uint8_t* value;
-    size_t value_len;
-    int ret = kvt_get(txn, key_buf, key_len, &value, &value_len);
+    // Get stats from metadata table
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    std::string value;
+    KVTError err = kvt_get(txn_id, spatial_meta_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          value, error_msg);
     
-    if (ret == 0 && value_len == sizeof(SpatialIndexStats)) {
-        memcpy(stats, value, sizeof(SpatialIndexStats));
+    if (err == KVTError::SUCCESS && value.size() == sizeof(SpatialIndexStats)) {
+        memcpy(stats, value.data(), sizeof(SpatialIndexStats));
         return 0;
     }
     
     return -1;
 }
 
-int KVTSpatialAdapter::validate_index(kvt_transaction_t* txn,
+int KVTSpatialAdapter::validate_index(uint64_t txn_id,
                                      uint64_t table_id,
                                      uint32_t index_id) {
     // TODO: Implement index validation
@@ -616,7 +633,7 @@ int KVTSpatialAdapter::validate_index(kvt_transaction_t* txn,
     return 0;
 }
 
-std::unique_ptr<RTreeNode> KVTSpatialAdapter::load_node(kvt_transaction_t* txn,
+std::unique_ptr<RTreeNode> KVTSpatialAdapter::load_node(uint64_t txn_id,
                                                        uint64_t table_id,
                                                        uint32_t index_id,
                                                        uint64_t node_id) {
@@ -624,18 +641,22 @@ std::unique_ptr<RTreeNode> KVTSpatialAdapter::load_node(kvt_transaction_t* txn,
     size_t key_len;
     make_node_key(key_buf, &key_len, table_id, index_id, node_id);
     
-    uint8_t* value;
-    size_t value_len;
-    int ret = kvt_get(txn, key_buf, key_len, &value, &value_len);
+    // Load from spatial index table
+    uint64_t spatial_index_table = (uint64_t(SPATIAL_INDEX_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    std::string value;
+    KVTError err = kvt_get(txn_id, spatial_index_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          value, error_msg);
     
-    if (ret == 0) {
-        return deserialize_node(value, value_len);
+    if (err == KVTError::SUCCESS) {
+        return deserialize_node(reinterpret_cast<const uint8_t*>(value.data()), value.size());
     }
     
     return nullptr;
 }
 
-int KVTSpatialAdapter::save_node(kvt_transaction_t* txn,
+int KVTSpatialAdapter::save_node(uint64_t txn_id,
                                 uint64_t table_id,
                                 uint32_t index_id,
                                 const RTreeNode& node) {
@@ -646,10 +667,17 @@ int KVTSpatialAdapter::save_node(kvt_transaction_t* txn,
     uint8_t value_buf[65536];  // Max node size
     size_t value_len = serialize_node(node, value_buf);
     
-    return kvt_set(txn, key_buf, key_len, value_buf, value_len);
+    // Save to spatial index table
+    uint64_t spatial_index_table = (uint64_t(SPATIAL_INDEX_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    KVTError err = kvt_set(txn_id, spatial_index_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          std::string(reinterpret_cast<char*>(value_buf), value_len),
+                          error_msg);
+    return err == KVTError::SUCCESS ? 0 : -1;
 }
 
-int KVTSpatialAdapter::delete_node(kvt_transaction_t* txn,
+int KVTSpatialAdapter::delete_node(uint64_t txn_id,
                                   uint64_t table_id,
                                   uint32_t index_id,
                                   uint64_t node_id) {
@@ -657,30 +685,40 @@ int KVTSpatialAdapter::delete_node(kvt_transaction_t* txn,
     size_t key_len;
     make_node_key(key_buf, &key_len, table_id, index_id, node_id);
     
-    return kvt_delete(txn, key_buf, key_len);
+    // Delete from spatial index table
+    uint64_t spatial_index_table = (uint64_t(SPATIAL_INDEX_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    KVTError err = kvt_del(txn_id, spatial_index_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          error_msg);
+    return err == KVTError::SUCCESS ? 0 : -1;
 }
 
-uint64_t KVTSpatialAdapter::get_root_node_id(kvt_transaction_t* txn,
+uint64_t KVTSpatialAdapter::get_root_node_id(uint64_t txn_id,
                                             uint64_t table_id,
                                             uint32_t index_id) {
     uint8_t key_buf[256];
     size_t key_len;
     make_meta_key(key_buf, &key_len, table_id, index_id, META_ROOT_NODE);
     
-    uint8_t* value;
-    size_t value_len;
-    int ret = kvt_get(txn, key_buf, key_len, &value, &value_len);
+    // Get from metadata table
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    std::string value;
+    KVTError err = kvt_get(txn_id, spatial_meta_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          value, error_msg);
     
-    if (ret == 0 && value_len == sizeof(uint64_t)) {
+    if (err == KVTError::SUCCESS && value.size() == sizeof(uint64_t)) {
         uint64_t root_id;
-        memcpy(&root_id, value, sizeof(uint64_t));
+        memcpy(&root_id, value.data(), sizeof(uint64_t));
         return root_id;
     }
     
     return 0;
 }
 
-int KVTSpatialAdapter::set_root_node_id(kvt_transaction_t* txn,
+int KVTSpatialAdapter::set_root_node_id(uint64_t txn_id,
                                        uint64_t table_id,
                                        uint32_t index_id,
                                        uint64_t root_id) {
@@ -688,11 +726,17 @@ int KVTSpatialAdapter::set_root_node_id(kvt_transaction_t* txn,
     size_t key_len;
     make_meta_key(key_buf, &key_len, table_id, index_id, META_ROOT_NODE);
     
-    return kvt_set(txn, key_buf, key_len,
-                   reinterpret_cast<uint8_t*>(&root_id), sizeof(root_id));
+    // Set in metadata table
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    KVTError err = kvt_set(txn_id, spatial_meta_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          std::string(reinterpret_cast<char*>(&root_id), sizeof(root_id)),
+                          error_msg);
+    return err == KVTError::SUCCESS ? 0 : -1;
 }
 
-uint64_t KVTSpatialAdapter::allocate_node_id(kvt_transaction_t* txn,
+uint64_t KVTSpatialAdapter::allocate_node_id(uint64_t txn_id,
                                             uint64_t table_id,
                                             uint32_t index_id) {
     uint8_t key_buf[256];
@@ -700,17 +744,22 @@ uint64_t KVTSpatialAdapter::allocate_node_id(kvt_transaction_t* txn,
     make_meta_key(key_buf, &key_len, table_id, index_id, META_NEXT_NODE_ID);
     
     uint64_t next_id = 1;
-    uint8_t* value;
-    size_t value_len;
+    uint64_t spatial_meta_table = (uint64_t(SPATIAL_META_KEYSPACE) << 56) | table_id;
+    std::string error_msg;
+    std::string value;
     
-    int ret = kvt_get(txn, key_buf, key_len, &value, &value_len);
-    if (ret == 0 && value_len == sizeof(uint64_t)) {
-        memcpy(&next_id, value, sizeof(uint64_t));
+    KVTError err = kvt_get(txn_id, spatial_meta_table,
+                          KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+                          value, error_msg);
+    if (err == KVTError::SUCCESS && value.size() == sizeof(uint64_t)) {
+        memcpy(&next_id, value.data(), sizeof(uint64_t));
     }
     
     uint64_t allocated_id = next_id++;
-    kvt_set(txn, key_buf, key_len,
-            reinterpret_cast<uint8_t*>(&next_id), sizeof(next_id));
+    kvt_set(txn_id, spatial_meta_table,
+            KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
+            std::string(reinterpret_cast<char*>(&next_id), sizeof(next_id)),
+            error_msg);
     
     return allocated_id;
 }

@@ -7,9 +7,28 @@
 #include <unordered_map>
 #include <mutex>
 #include "kvt/kvt_inc.h"
-#include "sql/spatial.h"
+#include "../../sql/spatial.h"
 
 namespace kvt_spatial {
+
+// MBR comparison macros (from InnoDB's gis0rtree.h)
+#define MBR_CONTAIN_CMP(a, b) \
+    ((((b)->xmin >= (a)->xmin) && ((b)->xmax <= (a)->xmax) \
+     && ((b)->ymin >= (a)->ymin) && ((b)->ymax <= (a)->ymax)))
+
+#define MBR_EQUAL_CMP(a, b) \
+    ((((b)->xmin == (a)->xmin) && ((b)->xmax == (a)->xmax)) \
+     && (((b)->ymin == (a)->ymin) && ((b)->ymax == (a)->ymax)))
+
+#define MBR_INTERSECT_CMP(a, b) \
+    ((((b)->xmin <= (a)->xmax) && ((b)->xmax >= (a)->xmin)) \
+     && (((b)->ymin <= (a)->ymax) && ((b)->ymax >= (a)->ymin)))
+
+#define MBR_DISJOINT_CMP(a, b) (!MBR_INTERSECT_CMP(a, b))
+
+#define MBR_WITHIN_CMP(a, b) \
+    ((((b)->xmin <= (a)->xmin) && ((b)->xmax >= (a)->xmax)) \
+     && (((b)->ymin <= (a)->ymin) && ((b)->ymax >= (a)->ymax)))
 
 // Maximum entries per R-tree node
 constexpr uint16_t MAX_NODE_ENTRIES = 64;
@@ -90,7 +109,7 @@ struct SpatialIndexStats {
 // Search iterator for spatial queries
 class SpatialSearchIterator {
 public:
-    SpatialSearchIterator(kvt_transaction_t* txn,
+    SpatialSearchIterator(uint64_t txn_id,
                          uint64_t table_id, 
                          uint32_t index_id,
                          const MBR& search_mbr,
@@ -109,7 +128,7 @@ private:
         SearchState(uint64_t id, uint8_t lvl) : node_id(id), level(lvl) {}
     };
     
-    kvt_transaction_t* txn_;
+    uint64_t txn_id_;
     uint64_t table_id_;
     uint32_t index_id_;
     MBR search_mbr_;
@@ -132,27 +151,27 @@ public:
     static void shutdown();
     
     // Index management
-    int create_spatial_index(kvt_transaction_t* txn,
+    int create_spatial_index(uint64_t txn_id,
                            uint64_t table_id, 
                            uint32_t index_id);
-    int drop_spatial_index(kvt_transaction_t* txn,
+    int drop_spatial_index(uint64_t txn_id,
                           uint64_t table_id, 
                           uint32_t index_id);
     
     // Data operations
-    int insert_spatial(kvt_transaction_t* txn,
+    int insert_spatial(uint64_t txn_id,
                       uint64_t table_id, 
                       uint32_t index_id,
                       uint64_t row_id, 
                       const MBR& mbr);
     
-    int delete_spatial(kvt_transaction_t* txn,
+    int delete_spatial(uint64_t txn_id,
                       uint64_t table_id, 
                       uint32_t index_id,
                       uint64_t row_id, 
                       const MBR& mbr);
     
-    int update_spatial(kvt_transaction_t* txn,
+    int update_spatial(uint64_t txn_id,
                       uint64_t table_id, 
                       uint32_t index_id,
                       uint64_t row_id,
@@ -161,28 +180,38 @@ public:
     
     // Search operations
     std::unique_ptr<SpatialSearchIterator> search(
-        kvt_transaction_t* txn,
+        uint64_t txn_id,
         uint64_t table_id, 
         uint32_t index_id,
         const MBR& search_mbr,
         SpatialPredicate predicate);
     
     // Bulk operations
-    int bulk_load(kvt_transaction_t* txn,
+    int bulk_load(uint64_t txn_id,
                  uint64_t table_id, 
                  uint32_t index_id,
                  const std::vector<std::pair<uint64_t, MBR>>& entries);
     
     // Statistics
-    int get_index_stats(kvt_transaction_t* txn,
+    int get_index_stats(uint64_t txn_id,
                        uint64_t table_id, 
                        uint32_t index_id,
                        SpatialIndexStats* stats);
     
     // Maintenance
-    int validate_index(kvt_transaction_t* txn,
+    int validate_index(uint64_t txn_id,
                       uint64_t table_id, 
                       uint32_t index_id);
+    
+    // Node I/O operations (made public for SpatialSearchIterator)
+    std::unique_ptr<RTreeNode> load_node(uint64_t txn_id,
+                                        uint64_t table_id,
+                                        uint32_t index_id,
+                                        uint64_t node_id);
+    
+    uint64_t get_root_node_id(uint64_t txn_id,
+                            uint64_t table_id,
+                            uint32_t index_id);
     
 private:
     KVTSpatialAdapter();
@@ -206,7 +235,7 @@ private:
     
     // R-tree operations
     struct InsertContext {
-        kvt_transaction_t* txn;
+        uint64_t txn_id;
         uint64_t table_id;
         uint32_t index_id;
         std::vector<uint64_t> path;  // Node IDs from root to leaf
@@ -229,33 +258,23 @@ private:
                     const MBR& left_mbr,
                     const MBR& right_mbr);
     
-    // Node I/O operations
-    std::unique_ptr<RTreeNode> load_node(kvt_transaction_t* txn,
-                                        uint64_t table_id,
-                                        uint32_t index_id,
-                                        uint64_t node_id);
-    
-    int save_node(kvt_transaction_t* txn,
+    // Node I/O operations (private versions)
+    int save_node(uint64_t txn_id,
                  uint64_t table_id,
                  uint32_t index_id,
                  const RTreeNode& node);
     
-    int delete_node(kvt_transaction_t* txn,
+    int delete_node(uint64_t txn_id,
                    uint64_t table_id,
                    uint32_t index_id,
                    uint64_t node_id);
     
-    // Metadata operations
-    uint64_t get_root_node_id(kvt_transaction_t* txn,
-                            uint64_t table_id,
-                            uint32_t index_id);
-    
-    int set_root_node_id(kvt_transaction_t* txn,
+    int set_root_node_id(uint64_t txn_id,
                         uint64_t table_id,
                         uint32_t index_id,
                         uint64_t root_id);
     
-    uint64_t allocate_node_id(kvt_transaction_t* txn,
+    uint64_t allocate_node_id(uint64_t txn_id,
                             uint64_t table_id,
                             uint32_t index_id);
     
@@ -279,7 +298,7 @@ private:
     
     // Delete operation helpers
     struct DeleteContext {
-        kvt_transaction_t* txn;
+        uint64_t txn_id;
         uint64_t table_id;
         uint32_t index_id;
         uint64_t target_row_id;
@@ -291,7 +310,7 @@ private:
                        uint64_t node_id,
                        uint8_t level);
     
-    int condense_tree(kvt_transaction_t* txn,
+    int condense_tree(uint64_t txn_id,
                      uint64_t table_id,
                      uint32_t index_id,
                      const std::vector<uint64_t>& path);

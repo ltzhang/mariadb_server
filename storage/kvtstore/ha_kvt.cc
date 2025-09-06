@@ -556,7 +556,7 @@ int ha_kvt::write_row(const uchar *buf)
   // Index spatial data for SPATIAL indexes
   auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
   auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
-  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
   
   for (uint i = 0; i < table->s->keys; i++) {
     if (table->key_info[i].flags & HA_SPATIAL) {
@@ -584,7 +584,7 @@ int ha_kvt::write_row(const uchar *buf)
           
           // For now, just use point MBR (can be extended for other geometries)
           uint64_t row_id = next_rowid - 1;
-          spatial_adapter->insert_spatial(kvt_txn, kvt_data_table_id, i, row_id, mbr);
+          spatial_adapter->insert_spatial(txn_id, kvt_data_table_id, i, row_id, mbr);
         }
       }
     }
@@ -1434,22 +1434,22 @@ int ha_kvt::ft_read(uchar *buf)
   std::string data_key = generate_data_key(row_key);
   
   // Get the row data
-  char value[65536];
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(kvt_tx_id, data_key.c_str(), data_key.length(),
-                   value, &value_len);
+  KVTError err = kvt_get(kvt_tx_id, kvt_data_table_id,
+                        KVTKey(data_key),
+                        value, error_msg);
   
-  if (ret == KVT_KEY_NOT_FOUND) {
+  if (err == KVTError::KEY_NOT_FOUND) {
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   }
-  if (ret != 0) {
-    DBUG_RETURN(map_kvt_error_to_mysql((KVTError)ret, "Failed to read row"));
+  if (err != KVTError::SUCCESS) {
+    DBUG_RETURN(map_kvt_error_to_mysql(err, "Failed to read row"));
   }
   
   // Decode row
-  std::string value_str(value, value_len);
-  if (decode_row(value_str, buf) != 0) {
+  if (decode_row(value, buf) != 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   
@@ -1481,9 +1481,9 @@ int ha_kvt::create_spatial_index(KEY* key_info, uint key_nr)
   
   auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
   auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
-  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
   
-  int ret = spatial_adapter->create_spatial_index(kvt_txn, kvt_data_table_id, key_nr);
+  int ret = spatial_adapter->create_spatial_index(txn_id, kvt_data_table_id, key_nr);
   
   DBUG_RETURN(ret == 0 ? 0 : HA_ERR_GENERIC);
 }
@@ -1501,9 +1501,9 @@ int ha_kvt::drop_spatial_index(uint key_nr)
   
   auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
   auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
-  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
   
-  int ret = spatial_adapter->drop_spatial_index(kvt_txn, kvt_data_table_id, key_nr);
+  int ret = spatial_adapter->drop_spatial_index(txn_id, kvt_data_table_id, key_nr);
   
   DBUG_RETURN(ret == 0 ? 0 : HA_ERR_GENERIC);
 }
@@ -1581,10 +1581,10 @@ int ha_kvt::spatial_search_init(uint index, const uchar* mbr_key, uint mbr_len, 
   // Initialize search iterator
   auto* spatial_adapter = kvt_spatial::KVTSpatialAdapter::get_instance();
   auto* tx_mgr = kvt_transaction::KVTTransactionManager::get_instance();
-  kvt_transaction_t* kvt_txn = tx_mgr->get_kvt_transaction(ha_thd());
+  uint64_t txn_id = tx_mgr->get_transaction_id(ha_thd());
   
   spatial_search->iterator = spatial_adapter->search(
-    kvt_txn,
+    txn_id,
     kvt_data_table_id,
     index,
     search_mbr,
@@ -1619,22 +1619,22 @@ int ha_kvt::spatial_search_next(uchar* buf)
   std::string data_key = generate_data_key(row_key);
   
   // Get row data
-  char value[65536];
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(kvt_tx_id, data_key.c_str(), data_key.length(),
-                   value, &value_len);
+  KVTError err = kvt_get(kvt_tx_id, kvt_data_table_id,
+                        KVTKey(data_key),
+                        value, error_msg);
   
-  if (ret == KVT_KEY_NOT_FOUND) {
+  if (err == KVTError::KEY_NOT_FOUND) {
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   }
-  if (ret != 0) {
-    DBUG_RETURN(map_kvt_error_to_mysql((KVTError)ret, "Failed to read row"));
+  if (err != KVTError::SUCCESS) {
+    DBUG_RETURN(map_kvt_error_to_mysql(err, "Failed to read row"));
   }
   
   // Decode row
-  std::string value_str(value, value_len);
-  if (decode_row(value_str, buf) != 0) {
+  if (decode_row(value, buf) != 0) {
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   
