@@ -1,0 +1,88 @@
+# Test pushdown operations and batch optimizations in KVT storage engine
+
+--source include/have_kvt.inc
+
+--echo # Test 1: Filter pushdown with simple equality
+CREATE TABLE t1 (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT,
+    city VARCHAR(30),
+    INDEX idx_age (age),
+    INDEX idx_city (city)
+) ENGINE=KVT;
+
+--echo # Insert test data
+INSERT INTO t1 VALUES 
+    (1, 'Alice', 25, 'New York'),
+    (2, 'Bob', 30, 'London'),
+    (3, 'Charlie', 25, 'Paris'),
+    (4, 'David', 35, 'Tokyo'),
+    (5, 'Eve', 30, 'London'),
+    (6, 'Frank', 25, 'New York'),
+    (7, 'Grace', 40, 'Paris'),
+    (8, 'Henry', 35, 'Tokyo'),
+    (9, 'Iris', 30, 'London'),
+    (10, 'Jack', 25, 'New York');
+
+--echo # Test filter pushdown: equality
+SELECT id, name FROM t1 WHERE age = 25;
+SELECT id, name FROM t1 WHERE city = 'London';
+
+--echo # Test filter pushdown: range
+SELECT id, name FROM t1 WHERE age > 30;
+SELECT id, name FROM t1 WHERE age BETWEEN 25 AND 30;
+
+--echo # Test filter pushdown: IN clause
+SELECT id, name FROM t1 WHERE city IN ('London', 'Paris');
+SELECT id, name FROM t1 WHERE age IN (25, 35);
+
+--echo # Test 2: Batch insert operations
+CREATE TABLE t2 (
+    id INT PRIMARY KEY,
+    counter INT DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'active'
+) ENGINE=KVT;
+
+--echo # Batch insert optimization
+START TRANSACTION;
+INSERT INTO t2 (id) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
+COMMIT;
+
+SELECT COUNT(*) FROM t2;
+
+--echo # Test 3: Aggregation functions
+CREATE TABLE t3 (
+    id INT PRIMARY KEY,
+    category VARCHAR(20),
+    amount DECIMAL(10,2),
+    quantity INT,
+    INDEX idx_category (category)
+) ENGINE=KVT;
+
+INSERT INTO t3 VALUES 
+    (1, 'Electronics', 999.99, 2),
+    (2, 'Books', 29.99, 5),
+    (3, 'Electronics', 1499.99, 1),
+    (4, 'Clothing', 79.99, 3),
+    (5, 'Books', 19.99, 10),
+    (6, 'Electronics', 299.99, 4),
+    (7, 'Clothing', 49.99, 2),
+    (8, 'Books', 39.99, 3),
+    (9, 'Electronics', 599.99, 1),
+    (10, 'Clothing', 89.99, 5);
+
+--echo # Test COUNT
+SELECT COUNT(*) FROM t3;
+SELECT COUNT(*) FROM t3 WHERE category = 'Electronics';
+
+--echo # Test SUM
+SELECT SUM(amount) FROM t3;
+SELECT SUM(amount) FROM t3 WHERE category = 'Electronics';
+
+--echo # Test MIN/MAX
+SELECT MIN(amount), MAX(amount) FROM t3;
+SELECT MIN(amount), MAX(amount) FROM t3 WHERE category = 'Books';
+
+--echo # Cleanup
+DROP TABLE t1, t2, t3;

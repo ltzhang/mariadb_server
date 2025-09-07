@@ -25,6 +25,7 @@
 #include "kvt_transaction_manager.h"
 #include "kvt_index_manager.h"
 #include "kvt_query_optimizer.h"
+#include "kvt_pushdown_optimizer.h"
 #include "kvt_foreign_key.h"
 #include "kvt_fulltext_adapter.h"
 #include "kvt_spatial_adapter.h"
@@ -1339,17 +1340,37 @@ int ha_kvt::read_range_first(const key_range *start_key,
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   
-  // Perform the scan
+  // Perform the scan with optional filter pushdown
   std::string error_msg;
-  KVTError err = kvt_scan(
-    txn_id,
-    3,  // INDEX_TABLE
-    KVTKey(kvt_start_key),
-    KVTKey(kvt_end_key),
-    1000,  // Batch size
-    range_scan_results,
-    error_msg
-  );
+  KVTError err;
+  
+  if (pushed_filter_func) {
+    // Use kvt_range_process with the pushed filter function
+    auto* pushdown_opt = kvt_pushdown::KVTPushdownOptimizer::get_instance();
+    std::string parameter;  // Empty for now, could encode filter details
+    
+    err = pushdown_opt->execute_pushdown(
+      txn_id,
+      3,  // INDEX_TABLE
+      KVTKey(kvt_start_key),
+      KVTKey(kvt_end_key),
+      pushed_filter_func,
+      parameter,
+      range_scan_results,
+      error_msg
+    );
+  } else {
+    // Regular scan without pushdown
+    err = kvt_scan(
+      txn_id,
+      3,  // INDEX_TABLE
+      KVTKey(kvt_start_key),
+      KVTKey(kvt_end_key),
+      1000,  // Batch size
+      range_scan_results,
+      error_msg
+    );
+  }
   
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     in_range_scan = false;
@@ -1725,6 +1746,31 @@ int ha_kvt::flush_batch_operations()
   
   if (batch_operations.empty()) {
     DBUG_RETURN(0);
+  }
+  
+  // Optimize batch operations using pushdown optimizer
+  auto* pushdown_opt = kvt_pushdown::KVTPushdownOptimizer::get_instance();
+  kvt_pushdown::BatchOperation batch_op;
+  batch_op.type = kvt_pushdown::BatchOperation::INSERT;  // Bulk insert context
+  
+  // Convert KVTBatchOps to BatchOperation format for optimization
+  for (const auto& op : batch_operations) {
+    batch_op.keys.push_back(op.key);
+    batch_op.values.push_back(op.value);
+  }
+  
+  // Optimize the batch (group by locality, combine operations)
+  pushdown_opt->optimize_batch_operations(batch_op, kvt_tx_id, kvt_data_table_id);
+  
+  // Convert back to KVTBatchOps after optimization
+  batch_operations.clear();
+  for (size_t i = 0; i < batch_op.keys.size(); i++) {
+    KVTOp op;
+    op.op = OP_SET;
+    op.table_id = kvt_data_table_id;
+    op.key = batch_op.keys[i];
+    op.value = i < batch_op.values.size() ? batch_op.values[i] : "";
+    batch_operations.push_back(op);
   }
   
   // Use kvt_batch_execute if available
@@ -2141,7 +2187,29 @@ const COND *ha_kvt::cond_push(const COND *cond)
 {
   DBUG_ENTER("ha_kvt::cond_push");
   
-  // Use the query optimizer to analyze and potentially push the condition
+  // First try the new pushdown optimizer for more advanced analysis
+  auto* pushdown_opt = kvt_pushdown::KVTPushdownOptimizer::get_instance();
+  kvt_pushdown::PushdownResult result = pushdown_opt->analyze_condition(
+      cond, table, kvt_data_table_id);
+  
+  if (result.can_pushdown) {
+    // Generate the pushdown function
+    pushed_filter_func = pushdown_opt->generate_filter_function(cond, table);
+    
+    if (pushed_filter_func) {
+      // Successfully generated pushdown function
+      pushed_cond = cond;
+      
+      // Record statistics
+      pushdown_opt->get_stats()->record_pushdown(
+          kvt_pushdown::PushdownType::FILTER, true);
+      
+      // Return nullptr to indicate we'll handle filtering
+      DBUG_RETURN(nullptr);
+    }
+  }
+  
+  // Fall back to the original query optimizer
   auto* optimizer = kvt_optimizer::KVTQueryOptimizer::get_instance();
   
   // Try to push condition to KVT

@@ -203,6 +203,7 @@ private:
   
   // Pushed conditions
   const COND *pushed_cond;
+  KVTProcessFunc pushed_filter_func;  // Pushdown filter function
   bool check_pushed_condition(const uchar *buf);
   
   // Index support
