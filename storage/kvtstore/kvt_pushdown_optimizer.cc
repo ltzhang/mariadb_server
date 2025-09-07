@@ -36,6 +36,13 @@ KVTPushdownOptimizer* KVTPushdownOptimizer::get_instance() {
     return instance;
 }
 
+void KVTPushdownOptimizer::cleanup_instance() {
+    if (instance != nullptr) {
+        delete instance;
+        instance = nullptr;
+    }
+}
+
 KVTPushdownOptimizer::KVTPushdownOptimizer() {
     stats.reset();
 }
@@ -719,6 +726,61 @@ KVTProcessFunc AtomicOperations::build_conditional_update(
     };
 }
 
+KVTProcessFunc AtomicOperations::build_decrement(uint field_index, int64_t delta) {
+    return build_increment(field_index, -delta);
+}
+
+KVTProcessFunc AtomicOperations::build_append(
+    uint field_index,
+    const std::string& suffix)
+{
+    return [field_index, suffix](
+        KVTProcessInput& input, KVTProcessOutput& output) -> bool
+    {
+        if (!input.value) return false;
+        
+        std::string field_value = FieldCodec::extract_field_value(
+            *input.value, field_index, nullptr);
+        
+        // Append suffix to field value
+        std::string new_value = field_value + suffix;
+        
+        output.update_value = *input.value;
+        FieldCodec::update_field_value(
+            *output.update_value, field_index, nullptr, new_value);
+        output.return_value = std::to_string(new_value.length());
+        
+        return true;
+    };
+}
+
+KVTProcessFunc AtomicOperations::build_compare_and_swap(
+    uint field_index,
+    const std::string& expected,
+    const std::string& new_value)
+{
+    return [field_index, expected, new_value](
+        KVTProcessInput& input, KVTProcessOutput& output) -> bool
+    {
+        if (!input.value) return false;
+        
+        std::string field_value = FieldCodec::extract_field_value(
+            *input.value, field_index, nullptr);
+        
+        // Compare and swap
+        if (field_value == expected) {
+            output.update_value = *input.value;
+            FieldCodec::update_field_value(
+                *output.update_value, field_index, nullptr, new_value);
+            output.return_value = "1";  // Success
+        } else {
+            output.return_value = "0";  // No swap
+        }
+        
+        return true;
+    };
+}
+
 // FieldCodec implementation
 
 std::string FieldCodec::extract_field_value(
@@ -881,6 +943,17 @@ bool is_sum_func_pushable(Item_sum::Sumfunctype type) {
         default:
             return false;
     }
+}
+
+// Missing BatchOptimizer::optimize_updates implementation
+bool BatchOptimizer::optimize_updates(
+    BatchOperation& batch,
+    TABLE* table)
+{
+    // For now, just do basic optimization
+    group_by_locality(batch);
+    combine_operations(batch);
+    return true;
 }
 
 } // namespace kvt_pushdown

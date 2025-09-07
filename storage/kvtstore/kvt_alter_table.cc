@@ -506,6 +506,13 @@ AlterTableManager* AlterTableManager::get_instance() {
     return instance_;
 }
 
+void AlterTableManager::cleanup_instance() {
+    if (instance_ != nullptr) {
+        delete instance_;
+        instance_ = nullptr;
+    }
+}
+
 AlterTableManager::AlterTableManager() {
 }
 

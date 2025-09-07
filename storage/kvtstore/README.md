@@ -157,6 +157,13 @@ gdb sql/mariadbd
 (gdb) run --defaults-file=/path/to/my.cnf
 ```
 
+## Known Limitations
+**IMPORTANT**: Please review [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for critical limitations including:
+- Savepoints are non-functional (placeholder implementation only)
+- Full-text search is disabled
+- Some index operations fall back to table scans
+- Foreign key constraints are not enforced
+
 ## Contributing
 Please refer to [PLAN.md](PLAN.md) for the implementation plan and current development status.
 

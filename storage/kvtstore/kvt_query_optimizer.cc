@@ -476,6 +476,14 @@ KVTQueryOptimizer* KVTQueryOptimizer::get_instance() {
   return instance;
 }
 
+void KVTQueryOptimizer::cleanup_instance() {
+  std::lock_guard<std::mutex> lock(instance_mutex);
+  if (instance != nullptr) {
+    delete instance;
+    instance = nullptr;
+  }
+}
+
 int KVTQueryOptimizer::optimize_query(THD* thd, TABLE* table, const COND* where_cond) {
   if (!where_cond) {
     return 0;  // No optimization needed

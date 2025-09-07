@@ -35,6 +35,13 @@ KVTUniqueConstraintManager* KVTUniqueConstraintManager::get_instance() {
     return instance;
 }
 
+void KVTUniqueConstraintManager::cleanup_instance() {
+    if (instance != nullptr) {
+        delete instance;
+        instance = nullptr;
+    }
+}
+
 KVTUniqueConstraintManager::KVTUniqueConstraintManager() {
     mysql_mutex_init(0, &mutex, MY_MUTEX_INIT_FAST);
 }

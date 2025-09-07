@@ -28,7 +28,7 @@
 #include "kvt_pushdown_optimizer.h"
 #include "kvt_alter_table.h"
 #include "kvt_foreign_key.h"
-#include "kvt_fulltext_adapter.h"
+// Full-text adapter removed - see KNOWN_LIMITATIONS.md
 #include "kvt_spatial_adapter.h"
 #include "kvt_statistics.h"
 #include "kvt_composite_index.h"
@@ -78,10 +78,11 @@ static void init_kvt_psi_keys()
 
 struct st_kvt_share
 {
-  char *table_name;
-  uint64_t table_id;
-  uint use_count;
   THR_LOCK lock;
+  uint64_t data_table_id;  // KVT table ID for database data
+  char *table_name;
+  char *database_name;
+  uint use_count;
   mysql_mutex_t mutex;
 };
 
@@ -145,6 +146,16 @@ static int kvt_deinit_func(void *p)
     kvt_shutdown();
     kvt_initialized = false;
   }
+
+  // Clean up singleton instances to prevent memory leaks
+  // These were allocated with new but never deleted
+  kvt_transaction::KVTTransactionManager::cleanup_instance();
+  kvt_index::KVTIndexManager::cleanup_instance();
+  kvt_optimizer::KVTQueryOptimizer::cleanup_instance();
+  kvt_pushdown::KVTPushdownOptimizer::cleanup_instance();
+  kvt_unique::KVTUniqueConstraintManager::cleanup_instance();
+  kvt_fk::ForeignKeyManager::cleanup_instance();
+  kvt_alter::AlterTableManager::cleanup_instance();
 
   my_hash_free(&kvt_open_tables);
   mysql_mutex_destroy(&kvt_mutex);
@@ -572,31 +583,13 @@ int ha_kvt::write_row(const uchar *buf)
   // Store the current position key for subsequent operations
   current_position_key = data_key;
   
-  // Index document for FULLTEXT indexes
-  auto* fts_adapter = kvt_fts::KVTFulltextAdapter::get_instance();
+  // Full-text indexing removed - see KNOWN_LIMITATIONS.md
+  // Previously indexed FULLTEXT columns here
+  // This functionality is disabled due to header dependency issues
   for (uint i = 0; i < table->s->keys; i++) {
     if (table->key_info[i].algorithm == HA_KEY_ALG_FULLTEXT) {
-      // Get text from FULLTEXT columns
-      KEY *key_info = &table->key_info[i];
-      std::string combined_text;
-      
-      for (uint j = 0; j < key_info->user_defined_key_parts; j++) {
-        Field *field = key_info->key_part[j].field;
-        if (!field->is_null()) {
-          char buff[MAX_FIELD_WIDTH];
-          String str(buff, sizeof(buff), field->charset());
-          field->val_str(&str);
-          if (!combined_text.empty()) combined_text += " ";
-          combined_text += std::string(str.ptr(), str.length());
-        }
-      }
-      
-      if (!combined_text.empty()) {
-        // Use row_id as document ID (assuming it's unique)
-        uint64_t doc_id = next_rowid - 1;  // We already incremented it
-        fts_adapter->index_document(kvt_data_table_id, i, doc_id,
-                                   combined_text.c_str(), combined_text.length());
-      }
+      // Full-text indexing disabled - skip FULLTEXT indexes
+      continue;
     }
   }
   
@@ -2045,6 +2038,7 @@ ha_kvt::kvt_table_share *ha_kvt::get_share(const char *path)
     // Get data table ID
     auto* catalog = kvt_catalog::CatalogManager::get_instance();
     share->data_table_id = catalog->get_data_table_id(db);
+    share->database_name = nullptr;  // TODO: Could be set if needed
     
     if (my_hash_insert(&kvt_open_tables, (uchar *)share))
     {
@@ -2336,25 +2330,9 @@ FT_INFO *ha_kvt::ft_init_ext(uint flags, uint inx, String *key)
 {
   DBUG_ENTER("ha_kvt::ft_init_ext");
   
-  // Check if index is fulltext
-  if (inx >= table->s->keys || table->key_info[inx].algorithm != HA_KEY_ALG_FULLTEXT) {
-    DBUG_RETURN(nullptr);
-  }
-  
-  // Get FTS adapter instance
-  auto* fts_adapter = kvt_fts::KVTFulltextAdapter::get_instance();
-  
-  // Initialize search
-  ft_handler = fts_adapter->init_search(
-    kvt_data_table_id,
-    inx,  // Use index number as index_id
-    flags,
-    key->ptr(),
-    key->length(),
-    table->s->table_charset
-  );
-  
-  DBUG_RETURN(ft_handler);
+  // Full-text search disabled - see KNOWN_LIMITATIONS.md
+  // Always return nullptr to indicate full-text search not supported
+  DBUG_RETURN(nullptr);
 }
 
 /**
@@ -2368,46 +2346,8 @@ int ha_kvt::ft_read(uchar *buf)
 {
   DBUG_ENTER("ha_kvt::ft_read");
   
-  if (!ft_handler) {
-    DBUG_RETURN(HA_ERR_WRONG_COMMAND);
-  }
-  
-  // Get next matching document ID
-  int error = ft_handler->please->read_next(ft_handler, (char*)buf);
-  if (error) {
-    DBUG_RETURN(error == HA_ERR_END_OF_FILE ? HA_ERR_END_OF_FILE : HA_ERR_GENERIC);
-  }
-  
-  // The FT handler returns doc_id, we need to fetch the actual row
-  // For now, we'll use the doc_id as row_id
-  kvt_fts::KVTFulltextInfo* kvt_ft = (kvt_fts::KVTFulltextInfo*)ft_handler;
-  uint64_t doc_id = kvt_ft->get_docid();
-  
-  // Construct key for the row
-  std::string row_key = std::to_string(doc_id);
-  std::string data_key = generate_data_key(row_key);
-  
-  // Get the row data
-  std::string value;
-  std::string error_msg;
-  
-  KVTError err = kvt_get(kvt_tx_id, kvt_data_table_id,
-                        KVTKey(data_key),
-                        value, error_msg);
-  
-  if (err == KVTError::KEY_NOT_FOUND) {
-    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-  }
-  if (err != KVTError::SUCCESS) {
-    DBUG_RETURN(map_kvt_error_to_mysql(err, "Failed to read row"));
-  }
-  
-  // Decode row
-  if (decode_row(value, buf) != 0) {
-    DBUG_RETURN(HA_ERR_GENERIC);
-  }
-  
-  DBUG_RETURN(0);
+  // Full-text search disabled - see KNOWN_LIMITATIONS.md
+  DBUG_RETURN(HA_ERR_UNSUPPORTED);
 }
 
 // Spatial search handle implementation

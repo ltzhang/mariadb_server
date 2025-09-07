@@ -83,6 +83,7 @@ public:
   
   // Singleton access
   static KVTIndexManager* get_instance();
+  static void cleanup_instance();
   
   // Index metadata management
   int create_index(const std::string& database, const std::string& table,

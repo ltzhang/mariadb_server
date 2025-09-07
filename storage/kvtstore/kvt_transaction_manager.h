@@ -54,6 +54,7 @@ class KVTTransactionManager {
 public:
   // Singleton access
   static KVTTransactionManager* get_instance();
+  static void cleanup_instance();
   
   // Transaction lifecycle management
   uint64_t begin_transaction(THD* thd, int isolation_level);

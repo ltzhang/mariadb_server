@@ -129,6 +129,7 @@ public:
   
   // Singleton access
   static ForeignKeyManager* get_instance();
+  static void cleanup_instance();
   
   // Constraint management
   int add_constraint(const std::string& database,

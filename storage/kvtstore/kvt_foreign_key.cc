@@ -197,6 +197,14 @@ ForeignKeyManager* ForeignKeyManager::get_instance() {
   return instance;
 }
 
+void ForeignKeyManager::cleanup_instance() {
+  std::lock_guard<std::mutex> lock(instance_mutex);
+  if (instance != nullptr) {
+    delete instance;
+    instance = nullptr;
+  }
+}
+
 std::string ForeignKeyManager::make_table_key(const std::string& database,
                                              const std::string& table) const {
   return database + "." + table;

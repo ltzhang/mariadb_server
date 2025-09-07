@@ -15,14 +15,23 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
+// Include my_global.h first as required by MariaDB
+#include "my_global.h"
+
+// Include MariaDB headers first before our headers to avoid conflicts
+// Disable warnings for unused static inline functions from system headers
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#include "sql_priv.h"
+#include "sql_class.h"
+#include "table.h"
+#pragma GCC diagnostic pop
+
+// Now include our header which includes ft_global.h
 #include "kvt_fulltext_adapter.h"
 #include <cmath>
 #include <algorithm>
 #include <sstream>
-// Include SQL headers last to avoid C++ template issues
-#include "sql_priv.h"
-#include "sql_class.h"
-#include "table.h"
 
 namespace kvt_fts {
 

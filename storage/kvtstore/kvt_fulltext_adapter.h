@@ -27,11 +27,13 @@
 #include <memory>
 #include <mutex>
 
-// Avoid C++ template errors with C headers by ensuring proper order
+// Include ft_global.h outside of extern "C" since it contains C++ code
+#include "ft_global.h"
+
+// Only wrap pure C headers in extern "C"
 #ifdef __cplusplus
 extern "C" {
 #endif
-#include "ft_global.h"
 #include "mysql/plugin_ftparser.h"
 #ifdef __cplusplus
 }

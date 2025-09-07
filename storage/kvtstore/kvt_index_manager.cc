@@ -48,6 +48,14 @@ KVTIndexManager* KVTIndexManager::get_instance() {
   return instance;
 }
 
+void KVTIndexManager::cleanup_instance() {
+  std::lock_guard<std::mutex> lock(instance_mutex);
+  if (instance != nullptr) {
+    delete instance;
+    instance = nullptr;
+  }
+}
+
 int KVTIndexManager::create_index(const std::string& database, 
                                  const std::string& table,
                                  const IndexMetadata& index_meta) {

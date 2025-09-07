@@ -15,10 +15,12 @@ SET(KVT_SOURCES
     kvt_index_manager.h
     kvt_query_optimizer.cc
     kvt_query_optimizer.h
+    kvt_pushdown_optimizer.cc
+    kvt_pushdown_optimizer.h
     kvt_foreign_key.cc
     kvt_foreign_key.h
-    # kvt_fulltext_adapter.cc  # Temporarily disabled - header dependency issues
-    # kvt_fulltext_adapter.h
+    kvt_fulltext_adapter.cc
+    kvt_fulltext_adapter.h
     kvt_spatial_adapter.cc
     kvt_spatial_adapter.h
     kvt_statistics.cc
@@ -44,7 +46,7 @@ ADD_DEFINITIONS(-DMYSQL_SERVER)
 # Compile the KVT memory implementation
 ADD_CUSTOM_COMMAND(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kvt_memory.o
-  COMMAND g++ -c -fPIC -g -O0 -I${CMAKE_CURRENT_SOURCE_DIR}/kvt 
+  COMMAND g++ -c -fPIC -g -O0 -D_GLIBCXX_DEBUG -I${CMAKE_CURRENT_SOURCE_DIR}/kvt 
           ${CMAKE_CURRENT_SOURCE_DIR}/kvt/kvt_mem.cpp
           -o ${CMAKE_CURRENT_BINARY_DIR}/kvt_memory.o
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kvt/kvt_mem.cpp

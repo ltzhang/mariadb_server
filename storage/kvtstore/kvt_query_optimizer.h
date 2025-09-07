@@ -241,6 +241,7 @@ public:
   
   // Singleton access
   static KVTQueryOptimizer* get_instance();
+  static void cleanup_instance();
   
   // Main optimization entry point
   int optimize_query(THD* thd, TABLE* table, const COND* where_cond);

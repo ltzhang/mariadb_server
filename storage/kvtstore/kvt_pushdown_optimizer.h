@@ -102,6 +102,7 @@ struct BatchOperation {
 class KVTPushdownOptimizer {
 public:
     static KVTPushdownOptimizer* get_instance();
+    static void cleanup_instance();
     
     /**
      * Analyze a condition for pushdown potential

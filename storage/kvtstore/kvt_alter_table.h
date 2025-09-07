@@ -281,6 +281,7 @@ private:
 class AlterTableManager {
 public:
     static AlterTableManager* get_instance();
+    static void cleanup_instance();
     
     /**
      * Check if ALTER can be done inplace

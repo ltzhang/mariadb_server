@@ -63,6 +63,7 @@ struct UniqueIndexInfo {
 class KVTUniqueConstraintManager {
 public:
     static KVTUniqueConstraintManager* get_instance();
+    static void cleanup_instance();
     
     /**
      * Check all unique constraints for a record

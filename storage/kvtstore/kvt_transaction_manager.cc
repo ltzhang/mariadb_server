@@ -46,6 +46,14 @@ KVTTransactionManager* KVTTransactionManager::get_instance() {
   return instance;
 }
 
+void KVTTransactionManager::cleanup_instance() {
+  std::lock_guard<std::mutex> lock(instance_mutex);
+  if (instance != nullptr) {
+    delete instance;
+    instance = nullptr;
+  }
+}
+
 uint64_t KVTTransactionManager::begin_transaction(THD* thd, int isolation_level) {
   std::lock_guard<std::mutex> lock(transactions_mutex);
   
