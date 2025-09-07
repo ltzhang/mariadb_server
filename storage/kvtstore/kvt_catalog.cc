@@ -474,7 +474,9 @@ int CatalogManager::delete_all_table_rows(const std::string& database,
   std::string error_msg;
   uint64_t data_table_id = get_data_table_id(database);
   if (data_table_id == 0) {
-    return HA_ERR_GENERIC;
+    // If database doesn't exist, there are no rows to delete
+    // This is OK for DROP TABLE IF EXISTS
+    return HA_ERR_KEY_NOT_FOUND;
   }
   
   // Use range update with delete function
