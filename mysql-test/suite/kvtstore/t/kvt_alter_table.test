@@ -1,0 +1,305 @@
+# Test ALTER TABLE functionality in KVT storage engine
+
+--source include/have_kvt.inc
+
+--echo # ========================================
+--echo # Test 1: Basic ALTER TABLE Operations
+--echo # ========================================
+
+CREATE TABLE t1 (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT,
+    email VARCHAR(100)
+) ENGINE=KVT;
+
+INSERT INTO t1 VALUES 
+    (1, 'Alice', 25, 'alice@example.com'),
+    (2, 'Bob', 30, 'bob@example.com'),
+    (3, 'Charlie', 35, 'charlie@example.com');
+
+--echo # Test ADD COLUMN (instant operation)
+ALTER TABLE t1 ADD COLUMN phone VARCHAR(20) DEFAULT '';
+SELECT * FROM t1 ORDER BY id;
+
+--echo # Test ADD COLUMN with position
+ALTER TABLE t1 ADD COLUMN city VARCHAR(50) DEFAULT 'Unknown' AFTER name;
+DESC t1;
+SELECT * FROM t1 ORDER BY id;
+
+--echo # Test DROP COLUMN (instant operation)
+ALTER TABLE t1 DROP COLUMN age;
+DESC t1;
+SELECT * FROM t1 ORDER BY id;
+
+--echo # Test RENAME COLUMN (instant operation)
+ALTER TABLE t1 RENAME COLUMN email TO email_address;
+DESC t1;
+SELECT * FROM t1 ORDER BY id;
+
+--echo # Test MODIFY COLUMN type
+ALTER TABLE t1 MODIFY COLUMN phone VARCHAR(30);
+DESC t1;
+
+--echo # Test CHANGE COLUMN (rename and modify)
+ALTER TABLE t1 CHANGE COLUMN city location VARCHAR(100) DEFAULT 'N/A';
+DESC t1;
+SELECT * FROM t1 ORDER BY id;
+
+--echo # ========================================
+--echo # Test 2: ALTER TABLE with Indexes
+--echo # ========================================
+
+CREATE TABLE t2 (
+    id INT PRIMARY KEY,
+    col1 INT,
+    col2 VARCHAR(50),
+    col3 INT,
+    col4 VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t2 VALUES 
+    (1, 100, 'data1', 10, 'text1'),
+    (2, 200, 'data2', 20, 'text2'),
+    (3, 300, 'data3', 30, 'text3'),
+    (4, 400, 'data4', 40, 'text4'),
+    (5, 500, 'data5', 50, 'text5');
+
+--echo # Test ADD INDEX (online operation)
+ALTER TABLE t2 ADD INDEX idx_col1 (col1);
+SHOW CREATE TABLE t2;
+
+--echo # Test ADD UNIQUE INDEX
+ALTER TABLE t2 ADD UNIQUE INDEX uk_col3 (col3);
+SHOW CREATE TABLE t2;
+
+--echo # Test ADD composite INDEX
+ALTER TABLE t2 ADD INDEX idx_composite (col2, col4);
+SHOW CREATE TABLE t2;
+
+--echo # Verify indexes work
+SELECT * FROM t2 WHERE col1 = 300;
+SELECT * FROM t2 WHERE col3 = 20;
+SELECT * FROM t2 WHERE col2 = 'data3' AND col4 = 'text3';
+
+--echo # Test DROP INDEX (instant operation)
+ALTER TABLE t2 DROP INDEX idx_col1;
+SHOW CREATE TABLE t2;
+
+--echo # Test ADD PRIMARY KEY (on table without primary key)
+CREATE TABLE t3 (
+    id INT NOT NULL,
+    data VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t3 VALUES (1, 'row1'), (2, 'row2'), (3, 'row3');
+ALTER TABLE t3 ADD PRIMARY KEY (id);
+SHOW CREATE TABLE t3;
+
+--echo # ========================================
+--echo # Test 3: ALTER TABLE with Constraints
+--echo # ========================================
+
+CREATE TABLE t4 (
+    id INT PRIMARY KEY,
+    value INT,
+    status VARCHAR(20)
+) ENGINE=KVT;
+
+INSERT INTO t4 VALUES (1, 100, 'active'), (2, 200, 'inactive'), (3, 300, 'active');
+
+--echo # Test ADD UNIQUE constraint
+ALTER TABLE t4 ADD UNIQUE (value);
+
+--echo # Verify unique constraint works
+--error ER_DUP_ENTRY
+INSERT INTO t4 VALUES (4, 100, 'test');
+
+--echo # Test ADD CHECK constraint (if supported)
+# ALTER TABLE t4 ADD CONSTRAINT chk_value CHECK (value > 0);
+
+--echo # Test CHANGE DEFAULT
+ALTER TABLE t4 ALTER COLUMN status SET DEFAULT 'pending';
+DESC t4;
+
+INSERT INTO t4 (id, value) VALUES (5, 500);
+SELECT * FROM t4 WHERE id = 5;
+
+--echo # ========================================
+--echo # Test 4: Online ALTER TABLE
+--echo # ========================================
+
+CREATE TABLE t5 (
+    id INT PRIMARY KEY,
+    data VARCHAR(100)
+) ENGINE=KVT;
+
+# Insert initial data
+INSERT INTO t5 VALUES (1, 'initial1'), (2, 'initial2'), (3, 'initial3');
+
+--echo # Test ADD INDEX with ALGORITHM=INPLACE
+ALTER TABLE t5 ADD INDEX idx_data (data), ALGORITHM=INPLACE, LOCK=NONE;
+SHOW CREATE TABLE t5;
+
+--echo # Test ADD COLUMN with ALGORITHM=INSTANT
+ALTER TABLE t5 ADD COLUMN created TIMESTAMP DEFAULT CURRENT_TIMESTAMP, ALGORITHM=INSTANT;
+DESC t5;
+
+--echo # ========================================
+--echo # Test 5: Complex ALTER Operations
+--echo # ========================================
+
+CREATE TABLE t6 (
+    id INT PRIMARY KEY,
+    col1 VARCHAR(50),
+    col2 INT,
+    col3 VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t6 VALUES (1, 'a', 10, 'x'), (2, 'b', 20, 'y'), (3, 'c', 30, 'z');
+
+--echo # Multiple operations in single ALTER
+ALTER TABLE t6 
+    ADD COLUMN col4 INT DEFAULT 0,
+    DROP COLUMN col3,
+    MODIFY COLUMN col1 VARCHAR(100),
+    ADD INDEX idx_col2 (col2);
+
+DESC t6;
+SHOW CREATE TABLE t6;
+
+--echo # ========================================
+--echo # Test 6: ALTER TABLE with NULL/NOT NULL
+--echo # ========================================
+
+CREATE TABLE t7 (
+    id INT PRIMARY KEY,
+    nullable_col INT,
+    non_null_col INT NOT NULL
+) ENGINE=KVT;
+
+INSERT INTO t7 VALUES (1, NULL, 100), (2, 200, 200), (3, NULL, 300);
+
+--echo # Change nullable to NOT NULL (should fail with NULL values)
+--error ER_INVALID_USE_OF_NULL
+ALTER TABLE t7 MODIFY COLUMN nullable_col INT NOT NULL;
+
+--echo # Update NULL values first
+UPDATE t7 SET nullable_col = 0 WHERE nullable_col IS NULL;
+
+--echo # Now change to NOT NULL
+ALTER TABLE t7 MODIFY COLUMN nullable_col INT NOT NULL;
+DESC t7;
+
+--echo # Change NOT NULL to nullable
+ALTER TABLE t7 MODIFY COLUMN non_null_col INT;
+DESC t7;
+
+--echo # ========================================
+--echo # Test 7: ALTER TABLE with Data Type Changes
+--echo # ========================================
+
+CREATE TABLE t8 (
+    id INT PRIMARY KEY,
+    int_col INT,
+    varchar_col VARCHAR(50),
+    decimal_col DECIMAL(10,2)
+) ENGINE=KVT;
+
+INSERT INTO t8 VALUES (1, 100, '200', 300.50), (2, 400, '500', 600.75);
+
+--echo # Widen INT to BIGINT (safe conversion)
+ALTER TABLE t8 MODIFY COLUMN int_col BIGINT;
+DESC t8;
+SELECT * FROM t8;
+
+--echo # Increase VARCHAR length (safe conversion)
+ALTER TABLE t8 MODIFY COLUMN varchar_col VARCHAR(100);
+DESC t8;
+
+--echo # Change DECIMAL precision
+ALTER TABLE t8 MODIFY COLUMN decimal_col DECIMAL(15,3);
+DESC t8;
+SELECT * FROM t8;
+
+--echo # ========================================
+--echo # Test 8: RENAME TABLE
+--echo # ========================================
+
+CREATE TABLE t9 (id INT PRIMARY KEY, data VARCHAR(50)) ENGINE=KVT;
+INSERT INTO t9 VALUES (1, 'test');
+
+ALTER TABLE t9 RENAME TO t9_renamed;
+--error ER_NO_SUCH_TABLE
+SELECT * FROM t9;
+SELECT * FROM t9_renamed;
+
+ALTER TABLE t9_renamed RENAME TO t9;
+SELECT * FROM t9;
+
+--echo # ========================================
+--echo # Test 9: ALTER TABLE Error Handling
+--echo # ========================================
+
+CREATE TABLE t10 (
+    id INT PRIMARY KEY,
+    unique_col INT UNIQUE,
+    data VARCHAR(50)
+) ENGINE=KVT;
+
+INSERT INTO t10 VALUES (1, 100, 'data1'), (2, 200, 'data2');
+
+--echo # Test duplicate key error
+--error ER_DUP_ENTRY
+INSERT INTO t10 VALUES (3, 100, 'data3');
+
+--echo # Test invalid column reference
+--error ER_BAD_FIELD_ERROR
+ALTER TABLE t10 ADD INDEX idx_invalid (non_existent_col);
+
+--echo # Test conflicting constraints
+# This would test adding a unique constraint on a column with duplicates
+
+--echo # ========================================
+--echo # Test 10: Performance of ALTER Operations
+--echo # ========================================
+
+CREATE TABLE t_perf (
+    id INT PRIMARY KEY,
+    col1 INT,
+    col2 VARCHAR(100)
+) ENGINE=KVT;
+
+# Insert many rows for performance testing
+DELIMITER //
+CREATE PROCEDURE insert_many()
+BEGIN
+    DECLARE i INT DEFAULT 1;
+    WHILE i <= 1000 DO
+        INSERT INTO t_perf VALUES (i, i * 10, CONCAT('data', i));
+        SET i = i + 1;
+    END WHILE;
+END//
+DELIMITER ;
+
+CALL insert_many();
+
+--echo # Test ALTER on large table
+SELECT COUNT(*) FROM t_perf;
+
+# Time the ALTER operation
+SET @start_time = NOW(6);
+ALTER TABLE t_perf ADD COLUMN col3 INT DEFAULT 0;
+SET @end_time = NOW(6);
+SELECT TIMESTAMPDIFF(MICROSECOND, @start_time, @end_time) AS alter_time_microseconds;
+
+# Verify data integrity
+SELECT COUNT(*) FROM t_perf WHERE col3 = 0;
+
+DROP PROCEDURE insert_many;
+
+--echo # ========================================
+--echo # Cleanup
+--echo # ========================================
+
+DROP TABLE IF EXISTS t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t_perf;

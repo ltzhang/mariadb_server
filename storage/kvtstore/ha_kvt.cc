@@ -26,6 +26,7 @@
 #include "kvt_index_manager.h"
 #include "kvt_query_optimizer.h"
 #include "kvt_pushdown_optimizer.h"
+#include "kvt_alter_table.h"
 #include "kvt_foreign_key.h"
 #include "kvt_fulltext_adapter.h"
 #include "kvt_spatial_adapter.h"
@@ -2628,6 +2629,127 @@ int ha_kvt::spatial_search_next(uchar* buf)
   }
   
   DBUG_RETURN(0);
+}
+
+// =============================================================================
+// ALTER TABLE Implementation
+// =============================================================================
+
+enum_alter_inplace_result ha_kvt::check_if_supported_inplace_alter(
+    TABLE *altered_table,
+    Alter_inplace_info *ha_alter_info)
+{
+  DBUG_ENTER("ha_kvt::check_if_supported_inplace_alter");
+  
+  auto* mgr = kvt_alter::AlterTableManager::get_instance();
+  enum_alter_inplace_result result = mgr->check_alter_support(
+      altered_table, ha_alter_info);
+  
+  DBUG_RETURN(result);
+}
+
+bool ha_kvt::prepare_inplace_alter_table(
+    TABLE *altered_table,
+    Alter_inplace_info *ha_alter_info)
+{
+  DBUG_ENTER("ha_kvt::prepare_inplace_alter_table");
+  
+  auto* mgr = kvt_alter::AlterTableManager::get_instance();
+  
+  // Prepare ALTER context
+  bool error = !mgr->prepare_alter(altered_table, ha_alter_info, &alter_context);
+  
+  if (error) {
+    my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
+             "Failed to prepare ALTER TABLE", table_name);
+    DBUG_RETURN(true);
+  }
+  
+  DBUG_RETURN(false);
+}
+
+bool ha_kvt::inplace_alter_table(
+    TABLE *altered_table,
+    Alter_inplace_info *ha_alter_info)
+{
+  DBUG_ENTER("ha_kvt::inplace_alter_table");
+  
+  if (!alter_context) {
+    my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
+             "ALTER context not initialized", table_name);
+    DBUG_RETURN(true);
+  }
+  
+  auto* mgr = kvt_alter::AlterTableManager::get_instance();
+  
+  // Execute ALTER operations
+  bool error = !mgr->execute_alter(alter_context);
+  
+  if (error) {
+    my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
+             "Failed to execute ALTER TABLE", table_name);
+    DBUG_RETURN(true);
+  }
+  
+  DBUG_RETURN(false);
+}
+
+bool ha_kvt::commit_inplace_alter_table(
+    TABLE *altered_table,
+    Alter_inplace_info *ha_alter_info,
+    bool commit)
+{
+  DBUG_ENTER("ha_kvt::commit_inplace_alter_table");
+  
+  if (!alter_context) {
+    DBUG_RETURN(false);  // Nothing to commit
+  }
+  
+  auto* mgr = kvt_alter::AlterTableManager::get_instance();
+  
+  // Commit or rollback based on flag
+  bool error = !mgr->commit_alter(alter_context, commit);
+  
+  // Clean up context
+  delete alter_context;
+  alter_context = nullptr;
+  
+  if (error) {
+    my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
+             commit ? "Failed to commit ALTER TABLE" : "Failed to rollback ALTER TABLE",
+             table_name);
+    DBUG_RETURN(true);
+  }
+  
+  DBUG_RETURN(false);
+}
+
+bool ha_kvt::rollback_inplace_alter_table(
+    TABLE *altered_table,
+    Alter_inplace_info *ha_alter_info)
+{
+  DBUG_ENTER("ha_kvt::rollback_inplace_alter_table");
+  
+  if (!alter_context) {
+    DBUG_RETURN(false);  // Nothing to rollback
+  }
+  
+  auto* mgr = kvt_alter::AlterTableManager::get_instance();
+  
+  // Rollback ALTER operations
+  bool error = !mgr->rollback_alter(alter_context);
+  
+  // Clean up context
+  delete alter_context;
+  alter_context = nullptr;
+  
+  if (error) {
+    my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
+             "Failed to rollback ALTER TABLE", table_name);
+    DBUG_RETURN(true);
+  }
+  
+  DBUG_RETURN(false);
 }
 
 struct st_mysql_storage_engine kvt_storage_engine =

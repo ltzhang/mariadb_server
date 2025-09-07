@@ -148,6 +148,24 @@ public:
   int optimize(THD* thd, HA_CHECK_OPT* check_opt) override;
   int check(THD* thd, HA_CHECK_OPT* check_opt) override;
   
+  // ALTER TABLE support
+  enum_alter_inplace_result check_if_supported_inplace_alter(
+      TABLE *altered_table,
+      Alter_inplace_info *ha_alter_info) override;
+  bool prepare_inplace_alter_table(
+      TABLE *altered_table,
+      Alter_inplace_info *ha_alter_info) override;
+  bool inplace_alter_table(
+      TABLE *altered_table,
+      Alter_inplace_info *ha_alter_info) override;
+  bool commit_inplace_alter_table(
+      TABLE *altered_table,
+      Alter_inplace_info *ha_alter_info,
+      bool commit) override;
+  bool rollback_inplace_alter_table(
+      TABLE *altered_table,
+      Alter_inplace_info *ha_alter_info) override;
+  
   // Condition pushdown
   const COND *cond_push(const COND *cond) override;
   void cond_pop() override;
@@ -232,6 +250,9 @@ private:
   bool range_sorted;
   std::vector<std::pair<KVTKey, std::string>> range_scan_results;
   size_t range_scan_position;
+  
+  // ALTER TABLE context
+  kvt_alter::AlterContext* alter_context;
 };
 
 #endif
