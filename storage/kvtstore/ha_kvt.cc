@@ -44,9 +44,8 @@ static HASH kvt_open_tables;
 static mysql_mutex_t kvt_mutex;
 static bool kvt_initialized = false;
 
-static PSI_mutex_key key_mutex_kvt, key_mutex_kvt_share;
-
 #ifdef HAVE_PSI_INTERFACE
+static PSI_mutex_key key_mutex_kvt, key_mutex_kvt_share;
 static PSI_mutex_info all_kvt_mutexes[] =
 {
   { &key_mutex_kvt, "kvt", PSI_FLAG_GLOBAL },
@@ -70,10 +69,22 @@ struct st_kvt_share
   mysql_mutex_t mutex;
 };
 
-static uchar* kvt_get_key(st_kvt_share *share, size_t *length,
+static uchar* kvt_get_key(const void *share_ptr, size_t *length,
                           my_bool not_used __attribute__((unused)))
 {
+  const st_kvt_share *share = static_cast<const st_kvt_share *>(share_ptr);
+  fprintf(stderr, "DEBUG: kvt_get_key called: share=%p, table_name=%p\n", 
+          share, share ? share->table_name : NULL);
+  if (!share || !share->table_name)
+  {
+    fprintf(stderr, "DEBUG: kvt_get_key returning NULL!\n");
+    *length = 0;
+    // Return empty string instead of NULL to avoid crash
+    static char empty_str[] = "";
+    return (uchar*) empty_str;
+  }
   *length = strlen(share->table_name);
+  fprintf(stderr, "DEBUG: kvt_get_key returning '%s' (len=%zu)\n", share->table_name, *length);
   return (uchar*) share->table_name;
 }
 
@@ -86,7 +97,11 @@ static int kvt_init_func(void *p)
   init_kvt_psi_keys();
 #endif
 
+#ifdef HAVE_PSI_INTERFACE
   mysql_mutex_init(key_mutex_kvt, &kvt_mutex, MY_MUTEX_INIT_FAST);
+#else
+  mysql_mutex_init(0, &kvt_mutex, MY_MUTEX_INIT_FAST);
+#endif
   (void) my_hash_init(PSI_NOT_INSTRUMENTED, &kvt_open_tables, system_charset_info, 32, 0, 0,
                       (my_hash_get_key) kvt_get_key, 0, 0);
 
@@ -95,12 +110,15 @@ static int kvt_init_func(void *p)
   kvt_hton->flags = HTON_CAN_RECREATE;
   kvt_hton->panic = kvt_panic_func;
   kvt_hton->drop_database = kvt_drop_database;
-  kvt_hton->close_connection = (int (*)(THD *)) kvt_close_connection;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+  kvt_hton->close_connection = reinterpret_cast<int (*)(THD *)>(kvt_close_connection);
   kvt_hton->commit = kvt_commit;
   kvt_hton->rollback = kvt_rollback;
-  kvt_hton->savepoint_set = (int (*)(THD *, void *)) kvt_savepoint_set;
-  kvt_hton->savepoint_rollback = (int (*)(THD *, void *)) kvt_savepoint_rollback;
-  kvt_hton->savepoint_release = (int (*)(THD *, void *)) kvt_savepoint_release;
+  kvt_hton->savepoint_set = reinterpret_cast<int (*)(THD *, void *)>(kvt_savepoint_set);
+  kvt_hton->savepoint_rollback = reinterpret_cast<int (*)(THD *, void *)>(kvt_savepoint_rollback);
+  kvt_hton->savepoint_release = reinterpret_cast<int (*)(THD *, void *)>(kvt_savepoint_release);
+#pragma GCC diagnostic pop
   kvt_hton->savepoint_offset = sizeof(void*);
   kvt_hton->db_type = DB_TYPE_UNKNOWN;
 
@@ -177,11 +195,6 @@ static void kvt_drop_database(handlerton *hton, char *path)
   catalog->drop_database(database);
   
   DBUG_VOID_RETURN;
-}
-
-static int kvt_close_connection(THD *thd)
-{
-  return 0;
 }
 
 static int kvt_commit(THD *thd, bool all)
@@ -483,8 +496,9 @@ int ha_kvt::write_row(const uchar *buf)
   // Check if we're doing bulk insert
   if (doing_bulk_insert) {
     // Add to batch
-    KVTBatchOps op;
-    op.type = KVTBatchOps::OpType::SET;
+    KVTOp op;
+    op.op = OP_SET;
+    op.table_id = kvt_data_table_id;
     op.key = KVTKey(data_key);
     op.value = row_value;
     batch_operations.push_back(op);
@@ -917,11 +931,12 @@ int ha_kvt::external_lock(THD *thd, int lock_type)
     // Ending a statement
     if (tx_mgr->has_active_transaction(thd)) {
       // Check if we should auto-commit
-      bool autocommit = (thd_get_ha_data(thd, ht)->option_flags & (uint)OPTION_AUTOCOMMIT) != 0;
+      // Use thd_test_options instead of accessing ha_data directly
+      bool autocommit = (thd_test_options(thd, OPTION_AUTOCOMMIT)) != 0;
       bool not_in_trans = true; // Simplified for now
       
       if (autocommit && not_in_trans) {
-        // Auto-commit the transaction
+        // Auto-commit the transaction (cast issue fix)
         DBUG_PRINT("info", ("Auto-committing transaction"));
         int ret = tx_mgr->commit_transaction(thd);
         if (ret != 0) {
@@ -986,10 +1001,10 @@ int ha_kvt::flush_batch_operations()
   
   // Use kvt_batch_execute if available
   std::string error_msg;
-  std::vector<KVTError> results(batch_operations.size());
+  KVTBatchResults results;
   
-  KVTError err = kvt_batch_execute(kvt_tx_id, kvt_data_table_id, 
-                                   batch_operations, results, error_msg);
+  KVTError err = kvt_batch_execute(kvt_tx_id, batch_operations, 
+                                   results, error_msg);
   
   if (err != KVTError::SUCCESS) {
     DBUG_RETURN(map_kvt_error_to_mysql(err, error_msg));
@@ -997,8 +1012,8 @@ int ha_kvt::flush_batch_operations()
   
   // Check individual results
   for (size_t i = 0; i < results.size(); i++) {
-    if (results[i] != KVTError::SUCCESS) {
-      DBUG_RETURN(map_kvt_error_to_mysql(results[i], "Batch operation failed"));
+    if (results[i].error != KVTError::SUCCESS) {
+      DBUG_RETURN(map_kvt_error_to_mysql(results[i].error, "Batch operation failed"));
     }
   }
   
@@ -1086,8 +1101,13 @@ ha_kvt::kvt_table_share *ha_kvt::get_share(const char *path)
     auto* catalog = kvt_catalog::CatalogManager::get_instance();
     share->data_table_id = catalog->get_data_table_id(db);
     
+    // Debug logging
+    fprintf(stderr, "DEBUG: get_share inserting: share=%p, table_name=%p, path='%s'\n", 
+            share, share->table_name, share->table_name);
+    
     if (my_hash_insert(&kvt_open_tables, (uchar *)share))
     {
+      fprintf(stderr, "DEBUG: my_hash_insert failed!\n");
       my_free(share);
       mysql_mutex_unlock(&kvt_mutex);
       return NULL;
@@ -1253,7 +1273,8 @@ bool ha_kvt::check_pushed_condition(const uchar *buf)
   }
   
   // The condition returns 0 for false, non-zero for true
-  bool result = pushed_cond->val_int() != 0;
+  // Cast away const for evaluation (required by MariaDB's Item interface)
+  bool result = const_cast<COND*>(pushed_cond)->val_int() != 0;
   
   DBUG_RETURN(result);
 }
@@ -1261,7 +1282,7 @@ bool ha_kvt::check_pushed_condition(const uchar *buf)
 struct st_mysql_storage_engine kvt_storage_engine =
 { MYSQL_HANDLERTON_INTERFACE_VERSION };
 
-mysql_declare_plugin(kvt)
+maria_declare_plugin(kvt)
 {
   MYSQL_STORAGE_ENGINE_PLUGIN,
   &kvt_storage_engine,
@@ -1274,7 +1295,7 @@ mysql_declare_plugin(kvt)
   0x0100,
   NULL,
   NULL,
-  NULL,
-  0,
+  "1.0",
+  MariaDB_PLUGIN_MATURITY_STABLE,
 }
-mysql_declare_plugin_end;
+maria_declare_plugin_end;

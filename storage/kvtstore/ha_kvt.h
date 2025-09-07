@@ -37,7 +37,7 @@ class ha_kvt: public handler
   bool is_delayed_insert;
   bool doing_bulk_insert;
   ha_rows bulk_insert_rows;
-  std::vector<KVTBatchOps> batch_operations;
+  KVTBatchOps batch_operations;
   
   // Table metadata
   std::string database_name;

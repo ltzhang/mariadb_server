@@ -52,9 +52,9 @@ int KVTIndexManager::create_index(const std::string& database,
                                  const std::string& table,
                                  const IndexMetadata& index_meta) {
   // Store index metadata in catalog
-  std::string meta_key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                        database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                        "IDXMETA" + NULL_SEPARATOR + index_meta.index_name;
+  std::string meta_key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                        database + SEPARATOR + table + SEPARATOR + 
+                        "IDXMETA" + SEPARATOR + index_meta.index_name;
   
   std::string meta_value = encode_index_metadata(index_meta);
   
@@ -67,7 +67,7 @@ int KVTIndexManager::create_index(const std::string& database,
   }
   
   // Store metadata
-  err = kvt_set(0, catalog_table_id, meta_key, meta_value, error_msg);
+  err = kvt_set(0, catalog_table_id, KVTKey(meta_key), meta_value, error_msg);
   if (err != KVTError::SUCCESS) {
     return -1;
   }
@@ -79,9 +79,9 @@ int KVTIndexManager::drop_index(const std::string& database,
                                const std::string& table,
                                const std::string& index_name) {
   // Delete index metadata
-  std::string meta_key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                        database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                        "IDXMETA" + NULL_SEPARATOR + index_name;
+  std::string meta_key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                        database + SEPARATOR + table + SEPARATOR + 
+                        "IDXMETA" + SEPARATOR + index_name;
   
   uint64_t catalog_table_id = 0;
   std::string error_msg;
@@ -91,7 +91,7 @@ int KVTIndexManager::drop_index(const std::string& database,
   }
   
   // Delete metadata
-  err = kvt_del(0, catalog_table_id, meta_key, error_msg);
+  err = kvt_del(0, catalog_table_id, KVTKey(meta_key), error_msg);
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     return -1;
   }
@@ -105,9 +105,9 @@ int KVTIndexManager::get_index_metadata(const std::string& database,
                                        const std::string& table,
                                        const std::string& index_name,
                                        IndexMetadata& meta) {
-  std::string meta_key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                        database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                        "IDXMETA" + NULL_SEPARATOR + index_name;
+  std::string meta_key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                        database + SEPARATOR + table + SEPARATOR + 
+                        "IDXMETA" + SEPARATOR + index_name;
   
   uint64_t catalog_table_id = 0;
   std::string error_msg;
@@ -117,7 +117,7 @@ int KVTIndexManager::get_index_metadata(const std::string& database,
   }
   
   std::string meta_value;
-  err = kvt_get(0, catalog_table_id, meta_key, meta_value, error_msg);
+  err = kvt_get(0, catalog_table_id, KVTKey(meta_key), meta_value, error_msg);
   if (err != KVTError::SUCCESS) {
     return -1;
   }
@@ -138,14 +138,14 @@ int KVTIndexManager::list_indexes(const std::string& database,
   }
   
   // Scan for all index metadata entries
-  std::string prefix = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                      database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                      "IDXMETA" + NULL_SEPARATOR;
+  std::string prefix = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                      database + SEPARATOR + table + SEPARATOR + 
+                      "IDXMETA" + SEPARATOR;
   std::string end_key = prefix;
   end_key[end_key.length() - 1]++;  // Increment last byte for exclusive end
   
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(0, catalog_table_id, prefix, end_key, 100, results, error_msg);
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(0, catalog_table_id, KVTKey(prefix), KVTKey(end_key), 100, results, error_msg);
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     return -1;
   }
@@ -161,7 +161,7 @@ int KVTIndexManager::list_indexes(const std::string& database,
 }
 
 std::string KVTIndexManager::create_primary_key(const uchar* record, TABLE* table) {
-  kvt_row::RowCodec codec(table);
+  kvt_row_codec::RowCodec codec(table);
   return codec.encode_primary_key(record);
 }
 
@@ -177,14 +177,14 @@ std::string KVTIndexManager::create_secondary_key(const uchar* record, TABLE* ta
     
     Field* field = table->field[col_pos];
     if (field->is_null()) {
-      key += NULL_SEPARATOR;
+      key += SEPARATOR;
       key += "NULL";
     } else {
       // Encode field value
       char buffer[256];
       String str(buffer, sizeof(buffer), field->charset());
       field->val_str(&str);
-      key += NULL_SEPARATOR;
+      key += SEPARATOR;
       key.append(str.ptr(), str.length());
     }
   }
@@ -198,10 +198,10 @@ std::string KVTIndexManager::create_index_entry_key(const std::string& database,
                                                    const std::string& index_value,
                                                    const std::string& primary_key) {
   // Format: __CATALOG__\x00<db>\x00<table>\x00IDX\x00<idx_name>\x00<idx_val>\x00<pk>
-  std::string key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                   database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                   "IDX" + NULL_SEPARATOR + index_name + 
-                   index_value + NULL_SEPARATOR + primary_key;
+  std::string key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                   database + SEPARATOR + table + SEPARATOR + 
+                   "IDX" + SEPARATOR + index_name + 
+                   index_value + SEPARATOR + primary_key;
   return key;
 }
 
@@ -234,7 +234,7 @@ int KVTIndexManager::insert_index_entry(uint64_t tx_id, uint64_t table_id,
   }
   
   // Store empty value for index entry
-  err = kvt_set(tx_id, catalog_table_id, entry_key, "", error_msg);
+  err = kvt_set(tx_id, catalog_table_id, KVTKey(entry_key), "", error_msg);
   if (err != KVTError::SUCCESS) {
     return -1;
   }
@@ -258,7 +258,7 @@ int KVTIndexManager::delete_index_entry(uint64_t tx_id, uint64_t table_id,
     return -1;
   }
   
-  err = kvt_del(tx_id, catalog_table_id, entry_key, error_msg);
+  err = kvt_del(tx_id, catalog_table_id, KVTKey(entry_key), error_msg);
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     return -1;
   }
@@ -324,9 +324,9 @@ int KVTIndexManager::index_init(void* scan_ctx, uint64_t tx_id, uint64_t table_i
   ctx.ascending = sorted;
   
   // Set up scan range for this index
-  ctx.current_key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                   database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                   "IDX" + NULL_SEPARATOR + index_name + NULL_SEPARATOR;
+  ctx.current_key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                   database + SEPARATOR + table + SEPARATOR + 
+                   "IDX" + SEPARATOR + index_name + SEPARATOR;
   ctx.end_key = ctx.current_key;
   ctx.end_key[ctx.end_key.length() - 1]++;  // Increment for exclusive end
   
@@ -351,8 +351,8 @@ int KVTIndexManager::index_read(void* scan_ctx, uchar* buf, const uchar* key,
   }
   
   // Scan for matching entries
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(ctx->tx_id, catalog_table_id, ctx->current_key, ctx->end_key, 
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(ctx->tx_id, catalog_table_id, KVTKey(ctx->current_key), KVTKey(ctx->end_key), 
                 1, results, error_msg);
   if (err != KVTError::SUCCESS || results.empty()) {
     return HA_ERR_END_OF_FILE;
@@ -395,7 +395,7 @@ int KVTIndexManager::index_first(void* scan_ctx, uchar* buf) {
   }
   
   // Position at first index entry
-  ctx->current_key = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
+  ctx->current_key = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
                     // ... reset to beginning of index
                     "";
   
@@ -425,9 +425,9 @@ bool KVTIndexManager::check_unique_constraint(uint64_t tx_id, uint64_t table_id,
                                              const std::string& index_name,
                                              const std::string& index_key) {
   // Check if index key already exists
-  std::string search_prefix = std::string(CATALOG_TABLE_NAME) + NULL_SEPARATOR + 
-                            database + NULL_SEPARATOR + table + NULL_SEPARATOR + 
-                            "IDX" + NULL_SEPARATOR + index_name + index_key + NULL_SEPARATOR;
+  std::string search_prefix = std::string(CATALOG_TABLE_NAME) + SEPARATOR + 
+                            database + SEPARATOR + table + SEPARATOR + 
+                            "IDX" + SEPARATOR + index_name + index_key + SEPARATOR;
   
   uint64_t catalog_table_id = 0;
   std::string error_msg;
@@ -439,8 +439,8 @@ bool KVTIndexManager::check_unique_constraint(uint64_t tx_id, uint64_t table_id,
   std::string end_key = search_prefix;
   end_key[end_key.length() - 1]++;
   
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(tx_id, catalog_table_id, search_prefix, end_key, 1, results, error_msg);
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(tx_id, catalog_table_id, KVTKey(search_prefix), KVTKey(end_key), 1, results, error_msg);
   
   return !results.empty();  // Returns true if duplicate found
 }
