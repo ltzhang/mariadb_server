@@ -26,6 +26,7 @@
 #include "kvt_constants.h"
 #include "kvt_catalog.h"
 #include "kvt_row_codec.h"
+#include "kvt_alter_table.h"
 #include <string>
 #include <memory>
 
@@ -164,15 +165,11 @@ public:
       bool commit) override;
   bool rollback_inplace_alter_table(
       TABLE *altered_table,
-      Alter_inplace_info *ha_alter_info) override;
+      Alter_inplace_info *ha_alter_info);
   
   // Condition pushdown
   const COND *cond_push(const COND *cond) override;
   void cond_pop() override;
-  
-  // Index-only scan support
-  int extra(enum ha_extra_function operation) override;
-  ulong index_flags(uint idx, uint part, bool all_parts) const override;
   
   // Full-text search support
   FT_INFO *ft_init_ext(uint flags, uint inx, String *key) override;
@@ -229,7 +226,7 @@ private:
   bool index_sorted;
   std::string index_scan_start_key;
   std::string index_scan_end_key;
-  std::vector<std::pair<std::string, std::string>> index_scan_results;
+  std::vector<std::pair<KVTKey, std::string>> index_scan_results;
   size_t index_scan_position;
   
   // Index-only scan state

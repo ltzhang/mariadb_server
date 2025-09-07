@@ -481,17 +481,20 @@ int CatalogManager::delete_all_table_rows(const std::string& database,
   KVTKey start_key(kvt_constants::make_data_scan_start(table));
   KVTKey end_key(kvt_constants::make_data_scan_end(table));
   
-  // Define a delete function
-  KVUpdateFunc delete_func = [](const KVTKey& key, const std::string& old_val,
-                                const std::string& param, std::string& new_val,
-                                std::string& result) -> std::tuple<bool, bool, bool> {
-    // Return: success=true, update=false (delete), return_value=false
-    return std::make_tuple(true, false, false);
-  };
-  
+  // Use scan and delete to clear all rows
   std::vector<std::pair<KVTKey, std::string>> results;
-  KVTError err = kvt_range_update(0, data_table_id, start_key, end_key,
-                                 1000000, delete_func, "", results, error_msg);
+  KVTError err = kvt_scan(0, data_table_id, start_key, end_key,
+                          1000000, results, error_msg);
+  
+  if (err == KVTError::SUCCESS) {
+    // Delete all found keys
+    for (const auto& kv : results) {
+      KVTError del_err = kvt_del(0, data_table_id, kv.first, error_msg);
+      if (del_err != KVTError::SUCCESS && del_err != KVTError::KEY_NOT_FOUND) {
+        return HA_ERR_GENERIC;
+      }
+    }
+  }
   
   return (err == KVTError::SUCCESS || err == KVTError::KEY_NOT_FOUND) ? 0 : HA_ERR_GENERIC;
 }
@@ -508,22 +511,21 @@ int CatalogManager::get_next_auto_increment(const std::string& database,
   
   std::string key = kvt_constants::make_seq_key(database, table, column);
   
-  // Use update function to atomically increment
-  KVUpdateFunc inc_func = [&value](const KVTKey& key, const std::string& old_val,
-                                   const std::string& param, std::string& new_val,
-                                   std::string& result) -> std::tuple<bool, bool, bool> {
-    if (old_val.empty()) {
-      value = 1;
-    } else {
-      value = std::stoull(old_val) + 1;
-    }
-    new_val = std::to_string(value);
-    result = new_val;
-    return std::make_tuple(true, true, true);
-  };
+  // Read current value
+  std::string current_val;
+  KVTError err = kvt_get(0, cat_id, KVTKey(key), current_val, error_msg);
   
-  std::string result;
-  KVTError err = kvt_update(0, cat_id, KVTKey(key), inc_func, "", result, error_msg);
+  if (err == KVTError::KEY_NOT_FOUND) {
+    value = 1;
+  } else if (err == KVTError::SUCCESS) {
+    value = std::stoull(current_val) + 1;
+  } else {
+    return HA_ERR_GENERIC;
+  }
+  
+  // Write back the new value
+  std::string new_val = std::to_string(value);
+  err = kvt_set(0, cat_id, KVTKey(key), new_val, error_msg);
   
   return (err == KVTError::SUCCESS) ? 0 : HA_ERR_GENERIC;
 }

@@ -26,6 +26,7 @@ namespace kvt_constants {
 // System table names - prefixed with __ to prevent user creation
 const char* const CATALOG_TABLE_NAME = "__CATALOG__";
 const char* const DATA_TABLE_PREFIX = "__DATA_";
+const char* const NULL_SEPARATOR = "\x00";
 
 // Key prefixes in catalog table
 const char* const DB_PREFIX = "DB";

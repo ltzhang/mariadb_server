@@ -296,9 +296,6 @@ std::string field_value_to_string(Field* field, const uchar* record) {
     char buff[MAX_FIELD_WIDTH];
     String str(buff, sizeof(buff), field->charset());
     
-    // Save current field pointer
-    const uchar* saved_ptr = field->ptr;
-    
     // Point field to record data
     field->move_field_offset((my_ptrdiff_t)(record - field->table->record[0]));
     

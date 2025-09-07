@@ -144,8 +144,8 @@ int KVTIndexManager::list_indexes(const std::string& database,
   std::string end_key = prefix;
   end_key[end_key.length() - 1]++;  // Increment last byte for exclusive end
   
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(0, catalog_table_id, prefix, end_key, 100, results, error_msg);
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(0, catalog_table_id, KVTKey(prefix), KVTKey(end_key), 100, results, error_msg);
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     return -1;
   }
@@ -161,7 +161,7 @@ int KVTIndexManager::list_indexes(const std::string& database,
 }
 
 std::string KVTIndexManager::create_primary_key(const uchar* record, TABLE* table) {
-  kvt_row::RowCodec codec(table);
+  kvt_row_codec::RowCodec codec(table);
   return codec.encode_primary_key(record);
 }
 
@@ -351,8 +351,8 @@ int KVTIndexManager::index_read(void* scan_ctx, uchar* buf, const uchar* key,
   }
   
   // Scan for matching entries
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(ctx->tx_id, catalog_table_id, ctx->current_key, ctx->end_key, 
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(ctx->tx_id, catalog_table_id, KVTKey(ctx->current_key), KVTKey(ctx->end_key), 
                 1, results, error_msg);
   if (err != KVTError::SUCCESS || results.empty()) {
     return HA_ERR_END_OF_FILE;
@@ -439,8 +439,8 @@ bool KVTIndexManager::check_unique_constraint(uint64_t tx_id, uint64_t table_id,
   std::string end_key = search_prefix;
   end_key[end_key.length() - 1]++;
   
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(tx_id, catalog_table_id, search_prefix, end_key, 1, results, error_msg);
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(tx_id, catalog_table_id, KVTKey(search_prefix), KVTKey(end_key), 1, results, error_msg);
   
   return !results.empty();  // Returns true if duplicate found
 }

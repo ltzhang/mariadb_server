@@ -8,9 +8,11 @@
 #define KVT_MARIADB_HANDLER_H
 
 #include "my_global.h"
+#include "sql_priv.h"
+#include "my_decimal.h"
 #include "sql_class.h"
-#include "sql_select.h"
 #include "item.h"
+#include "item_row.h"
 #include "item_func.h"
 #include "item_sum.h"
 #include "item_cmpfunc.h"

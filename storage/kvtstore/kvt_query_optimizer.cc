@@ -364,14 +364,14 @@ bool BatchOptimizer::should_use_batching(size_t expected_rows, BatchType type) {
   return expected_rows > 100;
 }
 
-int BatchOptimizer::aggregate_operations(std::vector<KVTBatchOps>& ops) {
+int BatchOptimizer::aggregate_operations(KVTBatchOps& ops) {
   // Sort operations by key for better locality
   // This is a placeholder - actual implementation would be more sophisticated
   return 0;
 }
 
 int BatchOptimizer::execute_batch(uint64_t tx_id, uint64_t table_id,
-                                 const std::vector<KVTBatchOps>& ops) {
+                                 const KVTBatchOps& ops) {
   auto start_time = std::chrono::steady_clock::now();
   
   // Execute in chunks
@@ -433,11 +433,11 @@ RangeOptimizer::analyze_range(const COND* cond, TABLE* table) {
 
 int RangeOptimizer::optimize_range_scan(uint64_t tx_id, uint64_t table_id,
                                        const RangeSpec& range,
-                                       std::vector<std::pair<std::string, std::string>>& results) {
+                                       std::vector<std::pair<KVTKey, std::string>>& results) {
   // Use KVT scan with range
   std::string error_msg;
   KVTError err = kvt_scan(tx_id, table_id, 
-                         range.start_key, range.end_key,
+                         KVTKey(range.start_key), KVTKey(range.end_key),
                          1000, results, error_msg);
   
   return (err == KVTError::SUCCESS) ? 0 : -1;

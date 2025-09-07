@@ -48,12 +48,12 @@ static int kvt_init_func(void *p);
 static int kvt_deinit_func(void *p);
 static int kvt_panic_func(handlerton *hton, ha_panic_function flag);
 static void kvt_drop_database(handlerton *hton, char *path);
-static int kvt_close_connection(handlerton *hton, THD *thd);
+static int kvt_close_connection(THD *thd);
 static int kvt_commit(THD *thd, bool all);
 static int kvt_rollback(THD *thd, bool all);
-static int kvt_savepoint_set(handlerton *hton, THD *thd, void *sv);
-static int kvt_savepoint_rollback(handlerton *hton, THD *thd, void *sv);
-static int kvt_savepoint_release(handlerton *hton, THD *thd, void *sv);
+static int kvt_savepoint_set(THD *thd, void *sv);
+static int kvt_savepoint_rollback(THD *thd, void *sv);
+static int kvt_savepoint_release(THD *thd, void *sv);
 
 static HASH kvt_open_tables;
 static mysql_mutex_t kvt_mutex;
@@ -110,12 +110,12 @@ static int kvt_init_func(void *p)
   kvt_hton->flags = HTON_CAN_RECREATE;
   kvt_hton->panic = kvt_panic_func;
   kvt_hton->drop_database = kvt_drop_database;
-  kvt_hton->close_connection = (int (*)(THD *)) kvt_close_connection;
+  kvt_hton->close_connection = kvt_close_connection;
   kvt_hton->commit = kvt_commit;
   kvt_hton->rollback = kvt_rollback;
-  kvt_hton->savepoint_set = (int (*)(THD *, void *)) kvt_savepoint_set;
-  kvt_hton->savepoint_rollback = (int (*)(THD *, void *)) kvt_savepoint_rollback;
-  kvt_hton->savepoint_release = (int (*)(THD *, void *)) kvt_savepoint_release;
+  kvt_hton->savepoint_set = kvt_savepoint_set;
+  kvt_hton->savepoint_rollback = kvt_savepoint_rollback;
+  kvt_hton->savepoint_release = kvt_savepoint_release;
   kvt_hton->savepoint_offset = sizeof(void*);
   kvt_hton->db_type = DB_TYPE_UNKNOWN;
 
@@ -165,7 +165,7 @@ static int kvt_panic_func(handlerton *hton, ha_panic_function flag)
   return 0;
 }
 
-static int kvt_close_connection(handlerton *hton, THD *thd)
+static int kvt_close_connection(THD *thd)
 {
   DBUG_ENTER("kvt_close_connection");
   
@@ -192,11 +192,6 @@ static void kvt_drop_database(handlerton *hton, char *path)
   catalog->drop_database(database);
   
   DBUG_VOID_RETURN;
-}
-
-static int kvt_close_connection(THD *thd)
-{
-  return 0;
 }
 
 static int kvt_commit(THD *thd, bool all)
@@ -252,7 +247,7 @@ struct kvt_savepoint_data {
   char name[64];
 };
 
-static int kvt_savepoint_set(handlerton *hton, THD *thd, void *sv)
+static int kvt_savepoint_set(THD *thd, void *sv)
 {
   DBUG_ENTER("kvt_savepoint_set");
   
@@ -281,7 +276,7 @@ static int kvt_savepoint_set(handlerton *hton, THD *thd, void *sv)
   DBUG_RETURN(0);
 }
 
-static int kvt_savepoint_rollback(handlerton *hton, THD *thd, void *sv)
+static int kvt_savepoint_rollback(THD *thd, void *sv)
 {
   DBUG_ENTER("kvt_savepoint_rollback");
   
@@ -306,7 +301,7 @@ static int kvt_savepoint_rollback(handlerton *hton, THD *thd, void *sv)
   DBUG_RETURN(0);
 }
 
-static int kvt_savepoint_release(handlerton *hton, THD *thd, void *sv)
+static int kvt_savepoint_release(THD *thd, void *sv)
 {
   DBUG_ENTER("kvt_savepoint_release");
   
@@ -346,16 +341,17 @@ ha_kvt::ha_kvt(handlerton *hton, TABLE_SHARE *table_arg)
     active_index(MAX_KEY),
     index_sorted(false),
     index_scan_position(0),
+    index_only_scan_active(false),
+    covering_index_id(MAX_KEY),
+    covered_columns_bitmap(nullptr),
+    covered_columns_buf(nullptr),
     last_error_key(0),
     last_dup_key(0),
     in_range_scan(false),
     range_eq_flag(false),
     range_sorted(false),
     range_scan_position(0),
-    index_only_scan_active(false),
-    covering_index_id(MAX_KEY),
-    covered_columns_bitmap(nullptr),
-    covered_columns_buf(nullptr)
+    alter_context(nullptr)
 {
 }
 
@@ -562,7 +558,7 @@ int ha_kvt::write_row(const uchar *buf)
     stats_mgr->increment_row_count(kvt_tx_id, kvt_data_table_id, 1);
     
     // Update index cardinality for all indexes
-    auto* index_mgr = kvt_index::KVTIndexManager::get_instance();
+    // auto* index_mgr = kvt_index::KVTIndexManager::get_instance();  // TODO: Use when implementing cardinality
     for (uint i = 0; i < table->s->keys; i++) {
       if (!(table->key_info[i].algorithm == HA_KEY_ALG_FULLTEXT) && 
           !(table->key_info[i].flags & HA_SPATIAL_INDEX)) {
@@ -642,6 +638,7 @@ int ha_kvt::write_row(const uchar *buf)
   }
   
   // Write composite index entries for all non-special indexes
+  std::string error_msg;  // Declare error_msg for index operations
   for (uint i = 0; i < table->s->keys; i++) {
     KEY *key_info = &table->key_info[i];
     
@@ -670,7 +667,7 @@ int ha_kvt::write_row(const uchar *buf)
       
       // Clean up bitmap
       if (covered_cols) {
-        bitmap_free(covered_cols);
+        my_bitmap_free(covered_cols);
         free(covered_cols->bitmap);
         free(covered_cols);
       }
@@ -767,6 +764,9 @@ int ha_kvt::update_row(const uchar *old_data, const uchar *new_data)
         kvt_data_table_id, i, key_info, old_data, row_id);
     KVTError del_err = kvt_del(kvt_tx_id, kvt_data_table_id, old_index_key, error_msg);
     // Ignore KEY_NOT_FOUND errors for index deletion
+    if (del_err != KVTError::SUCCESS && del_err != KVTError::KEY_NOT_FOUND) {
+      DBUG_RETURN(map_kvt_error_to_mysql(del_err, error_msg));
+    }
     
     // Insert new index entry
     std::string new_index_key = kvt_composite::build_composite_key_from_record(
@@ -1088,7 +1088,7 @@ int ha_kvt::index_read_map(uchar *buf, const uchar *key,
     // Try to decode covered columns from index value
     uint64_t row_id;
     int ret = kvt_index_only::decode_covered_columns_from_index_value(
-        index_scan_results[0].value, row_id, buf, table,
+        index_scan_results[0].second, row_id, buf, table,
         covered_columns_bitmap, table->read_set);
     
     if (ret == 0) {
@@ -1108,14 +1108,14 @@ int ha_kvt::index_read_map(uchar *buf, const uchar *key,
   // Regular path: fetch row data
   uint64_t row_id;
   // Check if value contains covered columns
-  if (index_scan_results[0].value.length() >= 8) {
+  if (index_scan_results[0].second.length() >= 8) {
     // Extract row_id from beginning of value
     uint64_t be_row_id;
-    std::memcpy(&be_row_id, index_scan_results[0].value.data(), sizeof(be_row_id));
+    std::memcpy(&be_row_id, index_scan_results[0].second.data(), sizeof(be_row_id));
     row_id = be64toh(be_row_id);
   } else {
     // Old format: just row_id as string
-    row_id = std::stoull(index_scan_results[0].value);
+    row_id = std::stoull(index_scan_results[0].second);
   }
   
   // Fetch the actual row data
@@ -1154,7 +1154,7 @@ int ha_kvt::index_next(uchar *buf)
       // Try to decode covered columns from index value
       uint64_t row_id;
       int ret = kvt_index_only::decode_covered_columns_from_index_value(
-          index_scan_results[index_scan_position].value, row_id, buf, table,
+          index_scan_results[index_scan_position].second, row_id, buf, table,
           covered_columns_bitmap, table->read_set);
       
       if (ret == 0) {
@@ -1171,15 +1171,15 @@ int ha_kvt::index_next(uchar *buf)
     // Regular path: extract row_id and fetch row
     uint64_t row_id;
     // Check if value contains covered columns
-    if (index_scan_results[index_scan_position].value.length() >= 8) {
+    if (index_scan_results[index_scan_position].second.length() >= 8) {
       // Extract row_id from beginning of value
       uint64_t be_row_id;
-      std::memcpy(&be_row_id, index_scan_results[index_scan_position].value.data(), 
+      std::memcpy(&be_row_id, index_scan_results[index_scan_position].second.data(), 
                   sizeof(be_row_id));
       row_id = be64toh(be_row_id);
     } else {
       // Old format: just row_id as string
-      row_id = std::stoull(index_scan_results[index_scan_position].value);
+      row_id = std::stoull(index_scan_results[index_scan_position].second);
     }
     
     // Fetch the actual row data
@@ -1210,7 +1210,7 @@ int ha_kvt::index_next(uchar *buf)
   // Need to fetch more results
   if (index_scan_results.size() == 100) {  // We fetched a full batch
     // Get the last key to continue from
-    std::string last_key = index_scan_results.back().key;
+    std::string last_key = index_scan_results.back().first;
     std::string end_key = kvt_composite::create_composite_range_end_key(last_key);
     
     index_scan_results.clear();
@@ -1227,7 +1227,7 @@ int ha_kvt::index_next(uchar *buf)
     
     if (!index_scan_results.empty()) {
       // Skip the first one as it's the same as the last one we processed
-      if (index_scan_results[0].key == last_key) {
+      if (static_cast<std::string>(index_scan_results[0].first) == last_key) {
         index_scan_position = 1;
       }
       DBUG_RETURN(index_next(buf));  // Recursive call to process new batch
@@ -1455,7 +1455,7 @@ int ha_kvt::read_range_next()
     // Check if we're still within the end range
     if (saved_end_key.key) {
       // Compare current index value with end key
-      KEY *key_info = &table->key_info[active_index];
+      // KEY *key_info = &table->key_info[active_index];  // Currently unused
       // Compare current index value with end key
       // For now, use a simple comparison - could be enhanced  
       int cmp = 0;  // TODO: Implement proper key comparison
@@ -1612,12 +1612,6 @@ int ha_kvt::info(uint flag)
     errkey = last_dup_key > 0 ? last_dup_key : last_error_key;
   }
   
-  DBUG_RETURN(0);
-}
-
-int ha_kvt::extra(enum ha_extra_function operation)
-{
-  DBUG_ENTER("ha_kvt::extra");
   DBUG_RETURN(0);
 }
 
@@ -1837,7 +1831,7 @@ ha_rows ha_kvt::records_in_range(uint inx, const key_range *min_key,
   }
   
   // Handle regular B-tree indexes
-  KEY *key_info = &table->key_info[inx];
+  // KEY *key_info = &table->key_info[inx];  // Currently unused
   
   // Build start and end keys for the range scan
   std::string start_key, end_key;
@@ -2272,7 +2266,7 @@ int ha_kvt::extra(enum ha_extra_function operation)
         
         // Clean up covered columns bitmap
         if (covered_columns_bitmap) {
-          bitmap_free(covered_columns_bitmap);
+          my_bitmap_free(covered_columns_bitmap);
           if (covered_columns_bitmap->bitmap) {
             free(covered_columns_bitmap->bitmap);
           }
@@ -2289,7 +2283,7 @@ int ha_kvt::extra(enum ha_extra_function operation)
       index_only_scan_active = false;
       covering_index_id = MAX_KEY;
       if (covered_columns_bitmap) {
-        bitmap_free(covered_columns_bitmap);
+        my_bitmap_free(covered_columns_bitmap);
         if (covered_columns_bitmap->bitmap) {
           free(covered_columns_bitmap->bitmap);
         }
@@ -2304,36 +2298,6 @@ int ha_kvt::extra(enum ha_extra_function operation)
   }
   
   DBUG_RETURN(0);
-}
-
-ulong ha_kvt::index_flags(uint idx, uint part, bool all_parts) const
-{
-  DBUG_ENTER("ha_kvt::index_flags");
-  
-  ulong flags = 0;
-  
-  if (idx < table_share->keys) {
-    KEY* key_info = &table->key_info[idx];
-    
-    // Basic index capabilities
-    flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE;
-    
-    // Support for keyread (index-only scan)
-    flags |= HA_KEYREAD_ONLY;
-    
-    // Primary key and unique indexes have special properties
-    if ((key_info->flags & HA_NOSAME) || idx == table_share->primary_key) {
-      flags |= HA_KEYREAD_ONLY | HA_READ_ORDER;
-    }
-    
-    // Don't support keyread for special index types
-    if (key_info->algorithm == HA_KEY_ALG_FULLTEXT ||
-        (key_info->flags & HA_SPATIAL_INDEX)) {
-      flags &= ~HA_KEYREAD_ONLY;
-    }
-  }
-  
-  DBUG_RETURN(flags);
 }
 
 bool ha_kvt::check_pushed_condition(const uchar *buf)
@@ -2657,7 +2621,7 @@ bool ha_kvt::prepare_inplace_alter_table(
   auto* mgr = kvt_alter::AlterTableManager::get_instance();
   
   // Prepare ALTER context
-  bool error = !mgr->prepare_alter(altered_table, ha_alter_info, &alter_context);
+  bool error = !mgr->prepare_alter(altered_table, ha_alter_info, &this->alter_context);
   
   if (error) {
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
@@ -2674,7 +2638,7 @@ bool ha_kvt::inplace_alter_table(
 {
   DBUG_ENTER("ha_kvt::inplace_alter_table");
   
-  if (!alter_context) {
+  if (!this->alter_context) {
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
              "ALTER context not initialized", table_name);
     DBUG_RETURN(true);
@@ -2683,7 +2647,7 @@ bool ha_kvt::inplace_alter_table(
   auto* mgr = kvt_alter::AlterTableManager::get_instance();
   
   // Execute ALTER operations
-  bool error = !mgr->execute_alter(alter_context);
+  bool error = !mgr->execute_alter(this->alter_context);
   
   if (error) {
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
@@ -2701,18 +2665,18 @@ bool ha_kvt::commit_inplace_alter_table(
 {
   DBUG_ENTER("ha_kvt::commit_inplace_alter_table");
   
-  if (!alter_context) {
+  if (!this->alter_context) {
     DBUG_RETURN(false);  // Nothing to commit
   }
   
   auto* mgr = kvt_alter::AlterTableManager::get_instance();
   
   // Commit or rollback based on flag
-  bool error = !mgr->commit_alter(alter_context, commit);
+  bool error = !mgr->commit_alter(this->alter_context, commit);
   
   // Clean up context
-  delete alter_context;
-  alter_context = nullptr;
+  delete this->alter_context;
+  this->alter_context = nullptr;
   
   if (error) {
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
@@ -2730,18 +2694,18 @@ bool ha_kvt::rollback_inplace_alter_table(
 {
   DBUG_ENTER("ha_kvt::rollback_inplace_alter_table");
   
-  if (!alter_context) {
+  if (!this->alter_context) {
     DBUG_RETURN(false);  // Nothing to rollback
   }
   
   auto* mgr = kvt_alter::AlterTableManager::get_instance();
   
   // Rollback ALTER operations
-  bool error = !mgr->rollback_alter(alter_context);
+  bool error = !mgr->rollback_alter(this->alter_context);
   
   // Clean up context
-  delete alter_context;
-  alter_context = nullptr;
+  delete this->alter_context;
+  this->alter_context = nullptr;
   
   if (error) {
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),

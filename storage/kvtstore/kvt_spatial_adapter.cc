@@ -664,15 +664,16 @@ int KVTSpatialAdapter::save_node(uint64_t txn_id,
     size_t key_len;
     make_node_key(key_buf, &key_len, table_id, index_id, node.node_id);
     
-    uint8_t value_buf[65536];  // Max node size
-    size_t value_len = serialize_node(node, value_buf);
+    // Use dynamic allocation to avoid large stack frame
+    std::vector<uint8_t> value_buf(65536);  // Max node size
+    size_t value_len = serialize_node(node, value_buf.data());
     
     // Save to spatial index table
     uint64_t spatial_index_table = (uint64_t(SPATIAL_INDEX_KEYSPACE) << 56) | table_id;
     std::string error_msg;
     KVTError err = kvt_set(txn_id, spatial_index_table,
                           KVTKey(std::string(reinterpret_cast<char*>(key_buf), key_len)),
-                          std::string(reinterpret_cast<char*>(value_buf), value_len),
+                          std::string(reinterpret_cast<char*>(value_buf.data()), value_len),
                           error_msg);
     return err == KVTError::SUCCESS ? 0 : -1;
 }

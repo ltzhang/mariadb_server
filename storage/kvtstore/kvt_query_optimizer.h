@@ -24,6 +24,8 @@
 #include <vector>
 #include <chrono>
 #include <memory>
+#include <map>
+#include <mutex>
 
 // Forward declarations
 class Item;
@@ -161,11 +163,11 @@ public:
   bool should_use_batching(size_t expected_rows, BatchType type);
   
   // Aggregate similar operations
-  int aggregate_operations(std::vector<KVTBatchOps>& ops);
+  int aggregate_operations(KVTBatchOps& ops);
   
   // Execute batch with optimal chunking
   int execute_batch(uint64_t tx_id, uint64_t table_id,
-                   const std::vector<KVTBatchOps>& ops);
+                   const KVTBatchOps& ops);
   
   // Get current batch statistics
   const QueryStatistics& get_statistics() const { return stats_; }
@@ -201,7 +203,7 @@ public:
   // Optimize range scan with pushdown
   int optimize_range_scan(uint64_t tx_id, uint64_t table_id,
                          const RangeSpec& range,
-                         std::vector<std::pair<std::string, std::string>>& results);
+                         std::vector<std::pair<KVTKey, std::string>>& results);
   
   // Estimate range selectivity
   double estimate_selectivity(const RangeSpec& range);

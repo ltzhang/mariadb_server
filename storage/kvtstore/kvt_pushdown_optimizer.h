@@ -19,9 +19,14 @@
 #define KVT_PUSHDOWN_OPTIMIZER_H
 
 #include "my_global.h"
+#include "sql_priv.h"
+#include "my_decimal.h"
 #include "sql_class.h"
-#include "sql_select.h"
 #include "item.h"
+#include "item_row.h"
+#include "item_sum.h"
+#include "item_func.h"
+#include "item_cmpfunc.h"
 #include "kvt/kvt_inc.h"
 #include <memory>
 #include <vector>

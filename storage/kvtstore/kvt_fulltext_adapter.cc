@@ -16,11 +16,13 @@
 */
 
 #include "kvt_fulltext_adapter.h"
-#include "sql_class.h"
-#include "table.h"
 #include <cmath>
 #include <algorithm>
 #include <sstream>
+// Include SQL headers last to avoid C++ template issues
+#include "sql_priv.h"
+#include "sql_class.h"
+#include "table.h"
 
 namespace kvt_fts {
 
@@ -160,7 +162,7 @@ int KVTFulltextInfo::execute_natural_search() {
 int KVTFulltextInfo::execute_boolean_search() {
   // Parse boolean query
   if (parse_boolean_query(query_.c_str(), query_.length()) != 0) {
-    return HA_ERR_FTS_INVALID_QUERY;
+    return HA_ERR_FTS_TOO_MANY_WORDS_IN_PHRASE;  // Use closest available error
   }
   
   IndexStatistics stats;
@@ -333,8 +335,9 @@ int KVTFulltextAdapter::create_fulltext_index(uint64_t table_id, uint32_t index_
   std::string stats_key = make_stats_key(table_id, index_id);
   std::string stats_value = serialize_statistics(stats);
   
-  int ret = kvt_set(KVT_DEFAULT_TXN, stats_key.c_str(), stats_key.length(),
-                   stats_value.c_str(), stats_value.length());
+  std::string error_msg;
+  KVTError err = kvt_set(0, table_id, KVTKey(stats_key), stats_value, error_msg);
+  int ret = (err == KVTError::SUCCESS) ? 0 : -1;
   
   // Cache the configuration
   std::lock_guard<std::mutex> lock(cache_mutex_);
@@ -355,8 +358,9 @@ int KVTFulltextAdapter::drop_fulltext_index(uint64_t table_id, uint32_t index_id
   std::string config_key = make_config_key(table_id, index_id);
   std::string stats_key = make_stats_key(table_id, index_id);
   
-  kvt_delete(KVT_DEFAULT_TXN, config_key.c_str(), config_key.length());
-  kvt_delete(KVT_DEFAULT_TXN, stats_key.c_str(), stats_key.length());
+  std::string error_msg;
+  kvt_del(0, table_id, KVTKey(config_key), error_msg);
+  kvt_del(0, table_id, KVTKey(stats_key), error_msg);
   
   return 0;
 }
@@ -427,7 +431,8 @@ int KVTFulltextAdapter::remove_document(uint64_t table_id, uint32_t index_id,
   
   // Remove document metadata
   std::string doc_key = make_doc_key(table_id, index_id, doc_id);
-  kvt_delete(KVT_DEFAULT_TXN, doc_key.c_str(), doc_key.length());
+  std::string error_msg;
+  kvt_del(0, table_id, KVTKey(doc_key), error_msg);
   
   // Update statistics
   update_index_statistics(table_id, index_id, -1, -meta.num_unique_terms);
@@ -482,18 +487,18 @@ int KVTFulltextAdapter::load_posting_list(uint64_t table_id, uint32_t index_id,
                                          std::vector<PostingEntry>& entries) {
   std::string key = make_term_key(table_id, index_id, term);
   
-  char value[65536]; // Max value size
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(KVT_DEFAULT_TXN, key.c_str(), key.length(), value, &value_len);
-  if (ret == KVT_KEY_NOT_FOUND) {
+  KVTError err = kvt_get(0, table_id, KVTKey(key), value, error_msg);
+  if (err == KVTError::KEY_NOT_FOUND) {
     return 0; // Term not found, empty posting list
   }
-  if (ret != 0) {
-    return ret;
+  if (err != KVTError::SUCCESS) {
+    return -1;
   }
   
-  std::string data(value, value_len);
+  std::string data = value;
   return deserialize_posting_list(data, entries);
 }
 
@@ -533,23 +538,24 @@ int KVTFulltextAdapter::store_posting_entry(uint64_t table_id, uint32_t index_id
   std::string key = make_term_key(table_id, index_id, term);
   std::string value = serialize_posting_list(entries);
   
-  return kvt_set(KVT_DEFAULT_TXN, key.c_str(), key.length(),
-                value.c_str(), value.length());
+  std::string error_msg;
+  KVTError err = kvt_set(0, table_id, KVTKey(key), value, error_msg);
+  return (err == KVTError::SUCCESS) ? 0 : -1;
 }
 
 int KVTFulltextAdapter::load_document_metadata(uint64_t table_id, uint32_t index_id,
                                               uint64_t doc_id, DocumentMetadata& meta) {
   std::string key = make_doc_key(table_id, index_id, doc_id);
   
-  char value[1024];
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(KVT_DEFAULT_TXN, key.c_str(), key.length(), value, &value_len);
-  if (ret != 0) {
-    return ret;
+  KVTError err = kvt_get(0, table_id, KVTKey(key), value, error_msg);
+  if (err != KVTError::SUCCESS) {
+    return -1;
   }
   
-  std::string data(value, value_len);
+  std::string data = value;
   return deserialize_metadata(data, meta);
 }
 
@@ -558,28 +564,29 @@ int KVTFulltextAdapter::store_document_metadata(uint64_t table_id, uint32_t inde
   std::string key = make_doc_key(table_id, index_id, doc_id);
   std::string value = serialize_metadata(meta);
   
-  return kvt_set(KVT_DEFAULT_TXN, key.c_str(), key.length(),
-                value.c_str(), value.length());
+  std::string error_msg;
+  KVTError err = kvt_set(0, table_id, KVTKey(key), value, error_msg);
+  return (err == KVTError::SUCCESS) ? 0 : -1;
 }
 
 int KVTFulltextAdapter::load_index_statistics(uint64_t table_id, uint32_t index_id,
                                              IndexStatistics& stats) {
   std::string key = make_stats_key(table_id, index_id);
   
-  char value[256];
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(KVT_DEFAULT_TXN, key.c_str(), key.length(), value, &value_len);
-  if (ret == KVT_KEY_NOT_FOUND) {
+  KVTError err = kvt_get(0, table_id, KVTKey(key), value, error_msg);
+  if (err == KVTError::KEY_NOT_FOUND) {
     // Initialize empty stats
     stats = IndexStatistics();
     return 0;
   }
-  if (ret != 0) {
-    return ret;
+  if (err != KVTError::SUCCESS) {
+    return -1;
   }
   
-  std::string data(value, value_len);
+  std::string data = value;
   return deserialize_statistics(data, stats);
 }
 
@@ -597,8 +604,9 @@ int KVTFulltextAdapter::update_index_statistics(uint64_t table_id, uint32_t inde
   std::string key = make_stats_key(table_id, index_id);
   std::string value = serialize_statistics(stats);
   
-  return kvt_set(KVT_DEFAULT_TXN, key.c_str(), key.length(),
-                value.c_str(), value.length());
+  std::string error_msg;
+  KVTError err = kvt_set(0, table_id, KVTKey(key), value, error_msg);
+  return (err == KVTError::SUCCESS) ? 0 : -1;
 }
 
 int KVTFulltextAdapter::load_config(uint64_t table_id, uint32_t index_id, FTSConfig& config) {
@@ -614,16 +622,16 @@ int KVTFulltextAdapter::load_config(uint64_t table_id, uint32_t index_id, FTSCon
   
   // Load from KVT
   std::string key = make_config_key(table_id, index_id);
-  char value[512];
-  size_t value_len = sizeof(value);
+  std::string value;
+  std::string error_msg;
   
-  int ret = kvt_get(KVT_DEFAULT_TXN, key.c_str(), key.length(), value, &value_len);
-  if (ret != 0) {
-    return ret;
+  KVTError err = kvt_get(0, table_id, KVTKey(key), value, error_msg);
+  if (err != KVTError::SUCCESS) {
+    return -1;
   }
   
   // Simple deserialization
-  std::string data(value, value_len);
+  std::string data = value;
   std::istringstream iss(data);
   iss >> config.parser_name >> config.min_word_len >> config.max_word_len >> config.with_positions;
   
@@ -645,8 +653,9 @@ int KVTFulltextAdapter::save_config(uint64_t table_id, uint32_t index_id, const 
       << config.max_word_len << " " << config.with_positions;
   std::string value = oss.str();
   
-  return kvt_set(KVT_DEFAULT_TXN, key.c_str(), key.length(),
-                value.c_str(), value.length());
+  std::string error_msg;
+  KVTError err = kvt_set(0, table_id, KVTKey(key), value, error_msg);
+  return (err == KVTError::SUCCESS) ? 0 : -1;
 }
 
 // Key generation methods

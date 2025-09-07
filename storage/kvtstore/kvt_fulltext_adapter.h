@@ -19,14 +19,23 @@
 #define KVT_FULLTEXT_ADAPTER_H
 
 #include "my_global.h"
-#include "ft_global.h"
-#include "mysql/plugin_ftparser.h"
 #include "kvt/kvt_inc.h"
 #include "kvt_constants.h"
 #include <string>
 #include <vector>
 #include <map>
 #include <memory>
+#include <mutex>
+
+// Avoid C++ template errors with C headers by ensuring proper order
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "ft_global.h"
+#include "mysql/plugin_ftparser.h"
+#ifdef __cplusplus
+}
+#endif
 
 // Forward declarations
 class THD;

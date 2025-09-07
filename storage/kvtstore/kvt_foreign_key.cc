@@ -505,8 +505,8 @@ int ForeignKeyManager::load_all_constraints(const std::string& database,
   std::string end_key = prefix;
   end_key[end_key.length() - 1]++;
   
-  std::vector<std::pair<std::string, std::string>> results;
-  err = kvt_scan(0, catalog_table_id, prefix, end_key, 100, results, error_msg);
+  std::vector<std::pair<KVTKey, std::string>> results;
+  err = kvt_scan(0, catalog_table_id, KVTKey(prefix), KVTKey(end_key), 100, results, error_msg);
   
   if (err != KVTError::SUCCESS && err != KVTError::KEY_NOT_FOUND) {
     return -1;
