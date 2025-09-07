@@ -66,29 +66,40 @@ int RowCodec::encode_row(const uchar* record, std::string& encoded) {
   header.serialize(header_buf);
   encoded.append(reinterpret_cast<char*>(header_buf), RowHeader::SIZE);
   
-  // Write null bitmap
-  const uchar* null_bitmap = record;
+  // Write null bitmap - create a proper bitmap, don't use the record buffer
+  uchar null_bitmap[32] = {0};  // Max 256 fields, all initialized to 0 (not null)
+  
+  // Check which fields are NULL
+  for (uint i = 0; i < fields.size(); i++) {
+    Field* field = fields[i];
+    if (field->is_null()) {
+      set_null(null_bitmap, i, true);
+    }
+  }
+  
   encoded.append(reinterpret_cast<const char*>(null_bitmap), null_bytes);
   
   // Write each field
   for (uint i = 0; i < fields.size(); i++) {
-    if (is_null(null_bitmap, i)) {
+    Field* field = fields[i];
+    
+    // Check if field is NULL using field's null_ptr and null_bit
+    if (field->is_null()) {
       continue;  // Skip NULL fields
     }
     
-    Field* field = fields[i];
-    
-    // Get field data
-    my_ptrdiff_t offset = field->ptr - table->record[0];
-    field->move_field_offset(offset);
+    // Calculate offset from field's normal position to the record we're encoding
+    my_ptrdiff_t field_offset = record - table->record[0];
+    field->move_field_offset(field_offset);
     
     // Encode field length and data
     std::string field_data;
     int ret = encode_field_data(field, field_data);
     if (ret != 0) {
-      field->move_field_offset(-offset);
+      field->move_field_offset(-field_offset);
       return ret;
     }
+    
     
     // Write length as varint
     encode_varint(field_data.length(), encoded);
@@ -96,7 +107,7 @@ int RowCodec::encode_row(const uchar* record, std::string& encoded) {
     // Write field data
     encoded.append(field_data);
     
-    field->move_field_offset(-offset);
+    field->move_field_offset(-field_offset);
   }
   
   return 0;
@@ -128,9 +139,11 @@ int RowCodec::decode_row(const std::string& encoded, uchar* record) {
     return HA_ERR_TABLE_CORRUPT;
   }
   
-  uchar* null_bitmap = record;
+  // Use a temporary buffer for the null bitmap, not the record itself
+  uchar null_bitmap[32] = {0};  // Max 256 fields
   std::memcpy(null_bitmap, data + offset, null_bytes);
   offset += null_bytes;
+  
   
   // Read each field
   for (uint i = 0; i < fields.size(); i++) {
@@ -151,7 +164,9 @@ int RowCodec::decode_row(const std::string& encoded, uchar* record) {
     Field* field = fields[i];
     field->set_notnull();
     
-    my_ptrdiff_t field_offset = field->ptr - table->record[0];
+    
+    // Calculate offset from field's normal position to the target record buffer
+    my_ptrdiff_t field_offset = record - table->record[0];
     field->move_field_offset(field_offset);
     
     int ret = decode_field_data(field, data + offset, field_length);
@@ -275,13 +290,14 @@ int RowCodec::encode_field_data(Field* field, std::string& output) {
   switch (field->type()) {
     case MYSQL_TYPE_LONG:
     {
-      // INT type - read directly from buffer
+      // INT type - read directly from buffer and encode in big-endian for storage
+      
       if (field->flags & UNSIGNED_FLAG) {
         uint32 value = uint4korr(field->ptr);
-        output = std::string(reinterpret_cast<const char*>(&value), sizeof(value));
+        output = encoding_utils::encode_uint32(value);
       } else {
         int32 value = sint4korr(field->ptr);
-        output = std::string(reinterpret_cast<const char*>(&value), sizeof(value));
+        output = encoding_utils::encode_int32(value);
       }
       break;
     }
@@ -290,13 +306,25 @@ int RowCodec::encode_field_data(Field* field, std::string& output) {
     case MYSQL_TYPE_STRING:
     {
       // VARCHAR/CHAR - get length and data directly
-      uint length = field->data_length();
       if (field->type() == MYSQL_TYPE_VARCHAR) {
-        // VARCHAR stores length prefix
-        length = uint2korr(field->ptr);
-        output.assign(reinterpret_cast<const char*>(field->ptr + 2), length);
+        // VARCHAR stores length prefix - read from the actual field ptr which has been offset-adjusted
+        // The field->ptr is already pointing to the right location after move_field_offset
+        // VARCHAR length can be 1 or 2 bytes depending on max length
+        uint length_bytes = (field->field_length < 256) ? 1 : 2;
+        uint length;
+        if (length_bytes == 1) {
+          length = (uint)(unsigned char)field->ptr[0];
+        } else {
+          length = uint2korr(field->ptr);
+        }
+        
+        if (length > field->field_length) {
+          length = 0;  // Treat as empty string for now
+        }
+        output.assign(reinterpret_cast<const char*>(field->ptr + length_bytes), length);
       } else {
         // CHAR is fixed length
+        uint length = field->field_length;
         output.assign(reinterpret_cast<const char*>(field->ptr), length);
       }
       break;
@@ -315,8 +343,72 @@ int RowCodec::encode_field_data(Field* field, std::string& output) {
 }
 
 int RowCodec::decode_field_data(Field* field, const uchar* data, size_t length) {
-  // Store data into field
-  return field->store(reinterpret_cast<const char*>(data), length, field->charset());
+  // Write directly to field's buffer to avoid marked_for_write assertions
+  // Handle different field types
+  switch (field->type()) {
+    case MYSQL_TYPE_LONG:
+    {
+      // INT type - decode from big-endian and write to buffer
+      if (length != sizeof(int32)) {
+        return HA_ERR_TABLE_CORRUPT;
+      }
+      
+      // Decode from big-endian format
+      int32 value;
+      if (field->flags & UNSIGNED_FLAG) {
+        uint32 uval = encoding_utils::decode_uint32(data);
+        value = static_cast<int32>(uval);
+      } else {
+        value = encoding_utils::decode_int32(data);
+      }
+      
+      // Store in field's buffer (MariaDB expects host byte order)
+      int4store(field->ptr, value);
+      
+      break;
+    }
+    
+    case MYSQL_TYPE_VARCHAR:
+    {
+      // VARCHAR - write length prefix and data
+      if (length > field->field_length) {
+        return HA_ERR_TABLE_CORRUPT;
+      }
+      
+      // VARCHAR length can be 1 or 2 bytes depending on max length
+      uint length_bytes = (field->field_length < 256) ? 1 : 2;
+      if (length_bytes == 1) {
+        field->ptr[0] = (unsigned char)length;
+      } else {
+        int2store(field->ptr, length);
+      }
+      // Copy data after length prefix
+      memcpy(field->ptr + length_bytes, data, length);
+      break;
+    }
+    
+    case MYSQL_TYPE_STRING:
+    {
+      // CHAR - fixed length, pad with spaces if needed
+      uint field_len = field->field_length;
+      if (length > field_len) {
+        return HA_ERR_TABLE_CORRUPT;
+      }
+      memcpy(field->ptr, data, length);
+      // Pad with spaces
+      if (length < field_len) {
+        memset(field->ptr + length, ' ', field_len - length);
+      }
+      break;
+    }
+    
+    default:
+      // For other types, fall back to store() (may cause assertion in debug mode)
+      // This should be expanded to handle all field types properly
+      return field->store(reinterpret_cast<const char*>(data), length, field->charset());
+  }
+  
+  return 0;
 }
 
 void RowCodec::encode_varint(uint64_t value, std::string& output) {
